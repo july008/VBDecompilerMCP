@@ -6,7 +6,6 @@
 C 语言实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [MCP（Model Context Protocol）](https://modelcontextprotocol.io) 服务器运行，使 AI 客户端能够通过 JSON-RPC 2.0 接口读取、修改由 VB Decompiler 反编译生成的代码与内部数据结构。
 
 <img src="pic/pic2.png" width="350" alt="截图">
-<img src="pic/pic3.png" width="350" alt="截图">
 ## 特性
 
 - **27 个 MCP 工具**：覆盖项目结构（Forms、Modules、Functions）、代码读写、元数据查询；`list_*` 工具支持 `limit`/`offset` 分页。
