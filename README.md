@@ -1,4 +1,5 @@
-# VB Decompiler MCP Server Plugin(https://www.vb-decompiler.org/plugins_sdk.htm)
+# VB Decompiler MCP Server Plugin
+(https://www.vb-decompiler.org/plugins_sdk.htm)
 
 [简体中文](README.md) | [English](README_EN.md)
 
