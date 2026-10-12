@@ -5,6 +5,7 @@
 
 A plugin for [VB Decompiler](https://www.vb-decompiler.org) written in C, running as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server. It allows AI clients to read and modify the code and internal data structures produced by VB Decompiler through a JSON-RPC 2.0 interface.
 
+<img src="pic/pic3.png" width="350" alt="截图">
 ## Features
 
 - **27 MCP tools**: covering project structure (Forms, Modules, Functions), code read/write, and metadata queries. `list_*` tools support `limit`/`offset` pagination.
@@ -14,7 +15,7 @@ A plugin for [VB Decompiler](https://www.vb-decompiler.org) written in C, runnin
 - **MCP protocol compatible**: Streamable HTTP + JSON-RPC 2.0 + SSE placeholder. Protocol version 2025-03-26 (2024-11-05 also supported).
 
 ## MCP Tool List
-
+<img src="pic/pic1.png" width="500" alt="截图">
 All tools share a `vb_` prefix to avoid name collisions with other MCP servers (e.g. iida).
 
 | Tool | Description |
