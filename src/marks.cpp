@@ -314,20 +314,36 @@ const char *marks_get(int module_index, int function_index)
 int marks_set(int module_index, int function_index,
               const char *mark, const char *name, const char *address)
 {
-    ensure_loaded();
-    const std::string k = key_of(module_index, function_index);
+    marks_item it;
+    it.module_index   = module_index;
+    it.function_index = function_index;
+    it.mark           = mark;
+    it.name           = name;
+    it.address        = address;
+    return marks_set_many(&it, 1);
+}
 
-    if (!mark || !*mark) {
-        g_marks.erase(k);                       /* 空串 = 取消标记 */
-    } else {
-        MarkEntry e;
-        e.mark = mark;
-        if (name)    e.name = name;
-        if (address) e.address = address;
-        stamp_now(&e.updated);
-        g_marks[k] = e;
+int marks_set_many(const marks_item *items, int count)
+{
+    if (!items || count <= 0) return 1;         /* 空批 = 无事可做 */
+    ensure_loaded();
+
+    std::string now;
+    stamp_now(&now);
+    for (int i = 0; i < count; i++) {
+        const std::string k = key_of(items[i].module_index, items[i].function_index);
+        if (!items[i].mark || !*items[i].mark) {
+            g_marks.erase(k);                   /* 空串 = 取消标记 */
+        } else {
+            MarkEntry e;
+            e.mark = items[i].mark;
+            if (items[i].name)    e.name = items[i].name;
+            if (items[i].address) e.address = items[i].address;
+            e.updated = now;
+            g_marks[k] = e;
+        }
     }
-    return save_current();
+    return save_current();                      /* 只写盘一次 */
 }
 
 int marks_enum(marks_enum_fn fn, void *user)

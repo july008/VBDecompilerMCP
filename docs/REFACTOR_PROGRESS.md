@@ -491,6 +491,7 @@ GUI 随之变空。**读取本身没有副作用，越界才是。**
 | 文件格式 | UTF-8 JSON；`marks` 键为 `"module_index,function_index"`，值 `{mark, name, address, updated}`（name/address 供人工核对） |
 | 缓存与写盘 | 进程内缓存 + 文件 mtime 感知（外部编辑/多窗口自动重载）；写入是"临时文件 + MoveFileEx 替换"的原子写 |
 | 新工具 | `vbd_read_marks`（分页列出）、`vbd_write_mark_function`（`mark` 传空串 = 清除） |
+| 批量标注 | `vbd_write_mark_function` 支持三种粒度：单个 `function_index` / 多个 `function_indices[]` / **省略索引 = 整个模块的全部函数**；批量路径走 `marks_set_many`，改完内存**只写盘一次**（逐项保存会在每项都做一次序列化 + 文件替换） |
 | 结果增强 | `vbd_read_function` / `vbd_find_function` 命中项带出 `mark`（自有 UTF-8 数据，不经编码桥） |
 | 工具数 | 29 → **31**（15 只读 + 16 写入） |
 

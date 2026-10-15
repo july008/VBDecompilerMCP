@@ -48,6 +48,8 @@ All tools use the `vbd_` prefix (avoids collisions with other MCP servers); the 
 | `vbd_read_active_text` / `vbd_read_active_disasm_text` | Active window / disassembly text |
 | `vbd_read_active_coords` | Active view coordinates |
 | `vbd_read_list_frx_icons` | FRX icon resources |
+| `vbd_find_function` | Find functions by name substring / address (accepts the on-screen form, e.g. `Proc_4_51_89CB90`) |
+| `vbd_read_marks` | List the marked functions of this project (marks live next to the analyzed program, **not** in the project) |
 
 ### Write group `vbd_write_*` (only after enabling write access)
 
@@ -58,6 +60,7 @@ All tools use the `vbd_` prefix (avoids collisions with other MCP servers); the 
 | `vbd_write_form` / `vbd_write_rename_form` | Modify / rename a form |
 | `vbd_write_module` / `vbd_write_module_string_references` | Modify declarations / string references |
 | `vbd_write_function` / `vbd_write_rename_function` | Modify code / rename a function |
+| `vbd_write_mark_function` | Mark a function: single index / `function_indices` (batch) / omit the index for the **whole module**; empty `mark` clears |
 | `vbd_write_sub_main` | Modify the entry point |
 | `vbd_write_active_text` / `vbd_write_active_disasm_text` | Edit the active window / disassembly text |
 | `vbd_write_goto_line` | Jump to a line |

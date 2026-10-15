@@ -44,6 +44,20 @@ const char *marks_get(int module_index, int function_index);
 int marks_set(int module_index, int function_index,
               const char *mark, const char *name, const char *address);
 
+/* 批量项（供 marks_set_many 使用） */
+typedef struct marks_item {
+    int         module_index;
+    int         function_index;
+    const char *mark;       /* UTF-8；NULL 或 "" = 删除该项 */
+    const char *name;       /* UTF-8，可为 NULL */
+    const char *address;    /* ASCII，可为 NULL */
+} marks_item;
+
+/* 批量设置 / 清除：全部改完内存后**只写盘一次**（逐个 marks_set 会在
+ * 每项都触发一次序列化 + 文件替换，批量场景下浪费明显）。
+ * 返回 1 = 成功，0 = 失败。count <= 0 视为成功（无事可做）。 */
+int marks_set_many(const marks_item *items, int count);
+
 /* 枚举全部标记（按 module_index,function_index 数值升序）。
  * 回调返回 0 可提前结束；返回实际枚举条数。 */
 typedef int (*marks_enum_fn)(int module_index, int function_index,

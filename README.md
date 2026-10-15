@@ -10,7 +10,7 @@ C++17 实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [
 ## 特性
 
 - **MCP Streamable HTTP 传输**：客户端 `POST` 发送请求，服务端通过 **SSE 长连接**推送消息与保活；协议版本在 `initialize` 时按客户端请求协商（支持 `2025-06-18` / `2025-03-26` / `2024-11-05`，默认回 `2025-03-26`）。
-- **28 个 MCP 工具，严格分两组**：`vbd_read_*`（13 个，只读，始终可见）与 `vbd_write_*`（15 个，仅在勾选「允许 MCP 客户端写入项目数据」后出现）。
+- **31 个 MCP 工具，严格分两组**：`vbd_read_*`（15 个，只读，始终可见）与 `vbd_write_*`（16 个，仅在勾选「允许 MCP 客户端写入项目数据」后出现）。
 - **默认只监听 `127.0.0.1`**：绝不默认监听 `0.0.0.0`；开放局域网需在设置窗体手动开启，并弹高危警告。
 - **会话准入授权**：客户端首次真正调用工具（`tools/call`）时弹窗确认，展示客户端连接信息；`listTools` 等预检不弹窗。
 - **默认只读**：`listTools` 动态过滤，写权限需用户在 UI 显式开启；`callTool` 入口二次校验权限。
@@ -49,6 +49,8 @@ C++17 实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [
 | `vbd_read_active_text` / `vbd_read_active_disasm_text` | 当前激活窗口 / 反汇编窗口文本 |
 | `vbd_read_active_coords` | 激活视图坐标 |
 | `vbd_read_list_frx_icons` | FRX 图标资源枚举 |
+| `vbd_find_function` | 按函数名子串 / 地址查找函数（支持界面显示形式，如 `Proc_4_51_89CB90`） |
+| `vbd_read_marks` | 列出本项目已标记的函数（标记存放在被分析程序旁，**不写入工程**） |
 
 ### 写入组 `vbd_write_*`（仅勾选写入权限后出现）
 
@@ -59,6 +61,7 @@ C++17 实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [
 | `vbd_write_form` / `vbd_write_rename_form` | Form 修改 / 重命名 |
 | `vbd_write_module` / `vbd_write_module_string_references` | Module 声明 / 字符串引用修改 |
 | `vbd_write_function` / `vbd_write_rename_function` | Function 代码修改 / 重命名 |
+| `vbd_write_mark_function` | 函数标记：单个索引 / `function_indices` 批量 / 省略索引即**整个模块**；`mark` 传空串清除 |
 | `vbd_write_sub_main` | 修改入口点 |
 | `vbd_write_active_text` / `vbd_write_active_disasm_text` | 修改当前窗口 / 反汇编窗口文本 |
 | `vbd_write_goto_line` | 跳转到指定行 |

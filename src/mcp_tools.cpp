@@ -820,46 +820,112 @@ static char *tool_read_marks(yyjson_val *args, int *out_err)
 }
 
 /* -------- vbd_write_mark_function --------
- * 设置 / 清除函数标记。**不写入工程**（vbdmcp 自有数据），
- * 因此在 native 项目上同样可用（与 vbd_write_rename_function 的限制不同）。 */
+ * 设置 / 清除函数标记，三种粒度（**不写入工程** —— vbdmcp 自有数据，
+ * native 项目同样可用，与 vbd_write_rename_function 的限制不同）：
+ *   1) function_index        → 单个函数；
+ *   2) function_indices[]    → 同一模块内一次多个；
+ *   3) 两者都不给（仅 module_index）→ **该模块的全部函数**。
+ * mark 传空串 = 清除。批量路径改完内存后只写盘一次（marks_set_many）。 */
 static char *tool_write_mark_function(yyjson_val *args, int *out_err)
 {
     if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
-    int midx = arg_index(args, "module_index", -1);
-    int fidx = arg_index(args, "function_index", -1);
-    if (midx < 0 || fidx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
-    if ((long long)midx >= module_total() ||
-        (long long)fidx >= module_function_total(midx)) {
+    const int midx = arg_index(args, "module_index", -1);
+    if (midx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if ((long long)midx >= module_total()) {
         return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
-            _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
-               module_function_total(midx)));
+            _F("module_index %d is out of range (the project has %lld modules)", midx, module_total()));
     }
+    const long long fn_total = module_function_total(midx);
     const char *mark = arg_str(args, "mark");      /* 缺省 / 空串 = 清除 */
 
-    /* name/address 作为人类可读的附加信息随标记一起存（引擎是 ANSI → 转 UTF-8） */
-    char *nm = vbd_get_value(VBD_GetModuleFunctionName, midx, fidx);
-    char *ad = vbd_get_value(VBD_GetModuleFunctionAddress, midx, fidx);
-    char *nm_u8 = vbdmcp_acp_to_utf8(nm ? nm : "");
-    char hex[32] = { 0 };
-    if (ad) {
-        const long long a = parse_uint_base(ad, 10);
-        if (a >= 0) _snprintf_s(hex, sizeof(hex), _TRUNCATE, "0x%llX", (unsigned long long)a);
+    /* ---- 目标函数集合（三种粒度） ---- */
+    std::vector<int> targets;
+    yyjson_val *indices = yyjson_obj_get(args, "function_indices");
+    if (indices && yyjson_is_arr(indices)) {
+        size_t i, n;
+        yyjson_val *v;
+        yyjson_arr_foreach(indices, i, n, v) {
+            if (!yyjson_is_int(v)) {
+                return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
+                    _("function_indices must be an array of non-negative integers"));
+            }
+            const long long x = yyjson_get_sint(v);
+            if (x < 0 || x > kMaxEngineIndex) {
+                return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
+                    _("function_indices must be an array of non-negative integers"));
+            }
+            targets.push_back((int)x);
+        }
+        if (targets.empty()) {
+            return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("function_indices must not be empty"));
+        }
+    } else {
+        const int fidx = arg_index(args, "function_index", -1);
+        if (fidx >= 0) {
+            targets.push_back(fidx);
+        } else {
+            /* 省略索引 = 整个模块 */
+            for (long long i = 0; i < fn_total; i++) targets.push_back((int)i);
+            if (targets.empty()) {
+                return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
+                    _F("module %d has no functions", midx));
+            }
+        }
     }
-    if (nm) vbdmcp_free(nm);
-    if (ad) vbdmcp_free(ad);
 
-    const int ok = marks_set(midx, fidx, mark ? mark : "", nm_u8, hex);
-    if (nm_u8) vbdmcp_free(nm_u8);
-    if (!ok) {
+    /* ---- 越界检查 + 收集附加信息（name/address，引擎 ANSI → UTF-8） ---- */
+    std::vector<marks_item>   items;
+    std::vector<std::string>  names_u8(targets.size());
+    std::vector<std::string>  hexes(targets.size());
+    items.reserve(targets.size());
+    for (size_t i = 0; i < targets.size(); i++) {
+        if ((long long)targets[i] >= fn_total) {
+            return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
+                _F("function_index %d is out of range (module %d has %lld functions)",
+                   targets[i], midx, fn_total));
+        }
+        char *nm = vbd_get_value(VBD_GetModuleFunctionName, midx, targets[i]);
+        char *ad = vbd_get_value(VBD_GetModuleFunctionAddress, midx, targets[i]);
+        char *nm_u8 = vbdmcp_acp_to_utf8(nm ? nm : "");
+        if (nm_u8) { names_u8[i] = nm_u8; vbdmcp_free(nm_u8); }
+        if (ad) {
+            const long long a = parse_uint_base(ad, 10);
+            if (a >= 0) {
+                char hex[32];
+                _snprintf_s(hex, sizeof(hex), _TRUNCATE, "0x%llX", (unsigned long long)a);
+                hexes[i] = hex;
+            }
+        }
+        if (nm) vbdmcp_free(nm);
+        if (ad) vbdmcp_free(ad);
+
+        marks_item it;
+        it.module_index   = midx;
+        it.function_index = targets[i];
+        it.mark           = mark ? mark : "";
+        it.name           = names_u8[i].c_str();
+        it.address        = hexes[i].empty() ? NULL : hexes[i].c_str();
+        items.push_back(it);
+    }
+
+    if (!marks_set_many(&items[0], (int)items.size())) {
         return err_json(out_err, VBDMCP_ERR_BUSINESS,
             _("Cannot write the marks file; check that the program's folder (or %TEMP%) is writable"));
     }
 
+    /* ---- 响应：单个保留 function_index（向后兼容）；批量给 count + function_indices ---- */
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
     if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
-    yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
+    yyjson_mut_obj_add_int(doc, root, "count", (long long)targets.size());
+    if (targets.size() == 1) {
+        yyjson_mut_obj_add_int(doc, root, "function_index", targets[0]);
+    } else {
+        yyjson_mut_val *arr = yyjson_mut_arr(doc);
+        for (size_t i = 0; i < targets.size(); i++) yyjson_mut_arr_add_int(doc, arr, targets[i]);
+        yyjson_mut_obj_add_val(doc, root, "function_indices", arr);
+    }
     yyjson_mut_obj_add_strcpy(doc, root, "mark", mark ? mark : "");
     const char *file = marks_file_path();
     char *file_u8 = vbdmcp_acp_to_utf8(file ? file : "");
@@ -1308,6 +1374,7 @@ typedef struct {
  * 搜索命中通常会喂给 vbd_read_function 逐条读取，一次给太多会灌爆上下文）。 */
 #define P_FIND_PAGING   (1u << 14)
 #define P_MARK          (1u << 15)   /* 函数标记文本（自由文本；空串/缺省 = 清除） */
+#define P_FUNCTION_INDICES (1u << 16)   /* function_indices：一次多个函数（数组） */
 
 static const tool_entry_t g_tools[] = {
     /* ---- 只读 ---- */
@@ -1335,7 +1402,7 @@ static const tool_entry_t g_tools[] = {
     { "vbd_write_module",             _("Replace the module's declarations header."),             P_MODULE_INDEX | P_DECLARATIONS,   1, 1, 1, tool_write_module },
     { "vbd_write_module_string_references", 0,                       P_MODULE_INDEX | P_STRING_REFS,    1, 1, 1, tool_write_module_string_references },
     { "vbd_write_function",           _("Replace a function's code."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_CODE, 1, 1, 1, tool_write_function },
-    { "vbd_write_mark_function",      _("Set or clear a mark on a function (free-form text, e.g. \"analyzed: crypto entry\"); pass an empty mark to clear. Marks live in vbdmcp's own file next to the analyzed program, so this also works on native-compiled projects; vbd_read_function / vbd_find_function / vbd_read_marks then report the mark."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_MARK, 1, 0, 1, tool_write_mark_function },
+    { "vbd_write_mark_function",      _("Set or clear a mark on one function, on several functions (function_indices), or on EVERY function of a module (omit the index arguments). Free-form text; an empty mark clears. Marks live in vbdmcp's own file next to the analyzed program, so this also works on native-compiled projects; vbd_read_function / vbd_find_function / vbd_read_marks report them."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_FUNCTION_INDICES | P_MARK, 1, 0, 1, tool_write_mark_function },
     { "vbd_write_rename_function",    _("Rename a function."),        P_MODULE_INDEX | P_FUNCTION_INDEX | P_NEW_NAME, 1, 0, 1, tool_write_rename_function },
     { "vbd_write_sub_main",           _("Set the Sub Main code."),           P_CODE,                            1, 1, 1, tool_write_sub_main },
     { "vbd_write_active_text",        _("Set the text of the currently active code window. Automatically calls UpdateAll."),        P_TEXT,                            1, 0, 1, tool_write_active_text },
@@ -1456,6 +1523,20 @@ static void param_str(yyjson_mut_doc *doc, yyjson_mut_val *props, const char *na
     yyjson_mut_obj_add_val(doc, props, name, o);
 }
 
+/* 非负整数数组参数（如 function_indices） */
+static void param_int_array(yyjson_mut_doc *doc, yyjson_mut_val *props,
+                            const char *name, const char *desc)
+{
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, o, "type", "array");
+    yyjson_mut_val *items = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, items, "type", "integer");
+    yyjson_mut_obj_add_int(doc, items, "minimum", 0);
+    yyjson_mut_obj_add_val(doc, o, "items", items);
+    if (desc) yyjson_mut_obj_add_strcpy(doc, o, "description", desc);
+    yyjson_mut_obj_add_val(doc, props, name, o);
+}
+
 static void param_onoff(yyjson_mut_doc *doc, yyjson_mut_val *props, const char *name)
 {
     yyjson_mut_val *o = yyjson_mut_obj(doc);
@@ -1521,6 +1602,9 @@ static void add_params(yyjson_mut_doc *doc, yyjson_mut_val *props, unsigned flag
     if (flags & P_MARK)
         param_str(doc, props, "mark",
                   _("Free-form mark text for this function (e.g. \"analyzed: crypto entry\"). Pass an empty string to clear the mark. Marks are stored by vbdmcp next to the analyzed program (see marks_file) and are NOT written into the project."));
+    if (flags & P_FUNCTION_INDICES)
+        param_int_array(doc, props, "function_indices",
+                        _("Mark several functions of the module in one call. Omit both function_index and function_indices to mark EVERY function of the module."));
     if (flags & P_OPTIONS) {
         param_onoff(doc, props, "stack_check");
         param_onoff(doc, props, "analyzer_check");
