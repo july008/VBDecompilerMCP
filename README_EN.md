@@ -168,7 +168,8 @@ Or run individually:
 
 - `tools\selftest` (encoding bridge / i18n / tool schema, 26 assertions);
 - `tools\e2e_test.ps1` (end-to-end MCP protocol: health / initialize version
-  negotiation / tools-list / ping / SSE / error surface, 12 assertions — runs
+  negotiation / tools-list / ping / SSE (incl. no-Content-Length and heartbeat
+  regressions) / error surface, 16 assertions — runs
   the real server code locally, **no VB Decompiler required**).
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) section 5.

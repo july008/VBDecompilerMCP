@@ -52,7 +52,10 @@ namespace {
 
 /* ---------------- 常量 ---------------- */
 constexpr int kSelectTimeoutMs  = 50;      /* 循环轮询间隔（同时保证关停响应及时） */
-constexpr int kSseHeartbeatMs   = 15000;   /* SSE 保活注释帧间隔 */
+/* SSE 保活注释帧间隔。取 5 秒（而非 15 秒）：心跳越积极，客户端越早确认
+ * 流是活的，也避免与客户端的空闲判定"踩在同一秒"（曾观察到客户端约 15 秒
+ * 即重连）。开销仅为每 5 秒 8 字节。 */
+constexpr int kSseHeartbeatMs   = 5000;
 constexpr int kRateLimitPerSec  = 200;     /* 全局基础限流 */
 constexpr int kTaskQueueLimit   = VBMCP_MAX_PENDING_TASKS;
 /* 单连接待发缓冲上限：SSE 通知/心跳只追加不等待，客户端不读时必须有上限，
@@ -362,10 +365,31 @@ void http_send_error(Connection* c, int http_status, int jsonrpc_code,
  * ============================================================ */
 void sse_begin(Connection* c, const std::string& origin)
 {
-    std::string extra;
-    if (!c->session_id.empty()) extra = "Mcp-Session-Id: " + c->session_id;
-    http_send_raw(c, 200, "text/event-stream; charset=utf-8", origin, extra,
-                  ": vbmcp sse stream open\n\n", true);
+    /* SSE 响应头**绝不能带 Content-Length**：SSE 是无限流，响应体的结束由
+     * 连接关闭界定。一旦写了长度，客户端（curl / Node SDK / CodeBuddy）
+     * 读完首帧就认为响应已完成 —— 表现为立刻断开并反复重连，客户端侧看到
+     * 的就是"连接不可用/无法连接"。这就是 http_send_raw 不能复用的原因。 */
+    std::string head;
+    head.reserve(256);
+    head += "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream; charset=utf-8\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: keep-alive\r\n";
+    if (!c->session_id.empty()) {
+        head += "Mcp-Session-Id: ";
+        head += c->session_id;
+        head += "\r\n";
+    }
+    const std::string cors = cors_headers(origin);
+    if (!cors.empty()) { head += cors; head += "\r\n"; }
+    head += "\r\n";
+
+    c->send_buf += head;
+    c->send_buf += ": vbmcp sse stream open\n\n";
+    c->close_after_send = false;
+    c->want_write = true;
+    vbmcp_flush(c);
+
     c->is_sse = true;
     c->last_active = std::chrono::steady_clock::now();
     vbmcp_logf(VBMCP_LOG_INFO, "sse stream opened (client=%s session=%s)",

@@ -388,5 +388,35 @@
    `FD_SET` 在满时会**静默忽略**新句柄（那些连接会不被 select 监视、静默挂起）。
 
 **验证**：新增 `tools/mcp_e2e`（本机把真实网络/RPC/工具代码跑成完整服务器，
-无需 VB Decompiler）+ `tools/e2e_test.ps1`（12 项断言）。修复后全部通过；
+无需 VB Decompiler）+ `tools/e2e_test.ps1`（当时 12 项断言，现已扩到 16 项）。修复后全部通过；
 修复前同一测试在 `/health` 一步即超时。已纳入 `tools/check_all.bat` 第 6 步。
+
+### 8.7 严重缺陷修复：SSE 响应带 Content-Length，客户端"无法连接"（用户反馈：CodeBuddy，2026-10-15）
+
+**现象（很能误导人）**：服务器 running，TCP 与请求处理都正常（日志有
+`client connected` / `tool task queued`）；`curl` 与**官方 MCP SDK** 的
+`initialize` / `tools/list` 全部成功；但 CodeBuddy 仍报"无法连接"。
+日志里唯一异常：客户端**每约 16 秒**断开并重建 SSE 连接。
+
+**根因**：SSE 响应复用了 `http_send_raw()`，而它无条件写
+`Content-Length: <首帧长度>`。SSE 是**无限流**，响应体的结束应由连接关闭界定；
+带上长度后客户端（curl / Node SDK / CodeBuddy）**读完首帧就认为响应已结束**，
+于是立即断开并重建 —— 客户端侧表现为"连接不可用/无法连接"，而 `tools/list`
+这类 POST 请求却一直是通的（所以极易误判为"服务器没问题"）。
+**该缺陷自阶段 D 起就存在**；此前的 e2e 断言只检查了 SSE 首帧存在，漏掉了它。
+
+**修复**（`sse_begin` 不再复用 `http_send_raw`）：
+
+1. 手写 SSE 响应头：`Content-Type: text/event-stream` + `Cache-Control: no-cache`
+   + `Connection: keep-alive`，**不写 Content-Length**；
+2. 心跳间隔 15s → 5s（更积极，避免与客户端空闲判定竞态）。
+
+**验证**（`tools/mcp_e2e` + 官方 SDK 客户端 30 秒稳定性对照）：
+
+| 对象 | 结果 |
+|---|---|
+| 修复后（新代码） | SDK 客户端 30 秒内 6/6 次 `listTools` 成功、无中途断开；curl 12 秒内收到多个 `: ping`，响应头无 `Content-Length` |
+| 修复前（用户运行的旧代码） | 客户端每约 16 秒重建 SSE（见用户日志），客户端侧判定连接不可用 |
+
+端到端断言从 12 项扩到 **16 项**，新增 "SSE 不带 Content-Length" 与
+"持续收到心跳" 两条回归断言 —— 这两条能直接抓住本缺陷。

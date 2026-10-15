@@ -390,7 +390,7 @@ _F("%d files, %zu bytes", 7, (size_t)1024);
 | `tools\\extract_i18n.bat` | 双击运行 `extract_i18n.py` 的包装（带 `pause`） |
 | `msbuild tools\selftest\selftest.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `tools\selftest\Win32\Debug\selftest\selftest.exe` | 构建并运行**无宿主**纯函数自测（编码桥 / i18n / 工具 schema）；**需在仓库根目录运行**，退出码 0 = 全绿 |
 | `msbuild tools\mcp_e2e\mcp_e2e.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `tools\mcp_e2e\Win32\Debug\mcp_e2e\mcp_e2e.exe [port]` | 本机运行**完整 MCP 服务器**（真实传输/RPC/工具代码，无需 VB Decompiler，默认 `127.0.0.1:3024`）；`set VBMCP_E2E_ALLOW_WRITE=1` 以读写模式启动 |
-| `powershell -File tools\e2e_test.ps1` | **端到端 MCP 协议测试**（12 项断言：health / initialize 版本协商 / tools-list / ping / SSE / 406·415·404·405）；先构建 mcp_e2e。这类测试捕获"能连上但拿不到数据"的传输层缺陷（见 REFACTOR_PROGRESS 8.6） |
+| `powershell -File tools\e2e_test.ps1` | **端到端 MCP 协议测试**（16 项断言：health / initialize 版本协商 / tools-list / 端点路径 / ping / SSE 无 Content-Length + 心跳 / 406·415·404·405）；先构建 mcp_e2e。这类测试专门捕获"能连上但拿不到数据/流被误判结束"的传输层缺陷（见 REFACTOR_PROGRESS 8.6、8.7） |
 | `tools\check_all.bat` | 一键提交前检查：`gen_ids_header --check` + `extract_i18n --check` + 自测构建/运行 + Release 构建 + 端到端协议测试 |
 | `msbuild tools\ui_preview\ui_preview.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `ui_preview.exe [en]` | **不需要 VB Decompiler** 即可渲染真实设置窗体，并截图到 `%TEMP%\vbmcp_ui_page*.bmp`（含"放大窗体后重排"的效果），同时把页窗口/页内控件坐标与消息转发结果写进 `%TEMP%\vbmcp_ui_probe.txt`，改 UI 后用它做回归对比 |
 | `python tools/gen_ids_header.py` / `--check` | 由 `res/vbmcp.rc` 的 `#define` 生成 `src/vbmcp_ids.h` / 校验两者一致（头文件是生成产物，不要手改） |
