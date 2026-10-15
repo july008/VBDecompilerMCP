@@ -164,7 +164,14 @@ One command runs every pre-commit check (resource IDs + i18n entries + host-free
 tools\check_all.bat
 ```
 
-Or run `tools\selftest` alone (encoding bridge / i18n / tool schema, 26 assertions) — see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) section 5.
+Or run individually:
+
+- `tools\selftest` (encoding bridge / i18n / tool schema, 26 assertions);
+- `tools\e2e_test.ps1` (end-to-end MCP protocol: health / initialize version
+  negotiation / tools-list / ping / SSE / error surface, 12 assertions — runs
+  the real server code locally, **no VB Decompiler required**).
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) section 5.
 
 ### Client configuration
 

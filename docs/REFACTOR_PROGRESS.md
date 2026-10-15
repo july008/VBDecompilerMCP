@@ -363,3 +363,30 @@
 | Accept 校验 | POST 要求 `Accept` 必须含 `application/json`，只声明 `text/event-stream` 的客户端会被 `406` | 放宽：命中 `application/json` 或 `text/event-stream` 其一（或未携带）即放行（响应体始终是 JSON） |
 | chunked 传输 | `Transfer-Encoding: chunked` 被当成空 body，报误导性的 parse error | 明确回 `400` + `send Content-Length instead`；MCP 客户端均使用 Content-Length，不做 chunked 解码 |
 | 诊断日志 | "连不上"时看不到请求头细节 | DEBUG 级请求日志增加 `accept` / `content-type` / 协议版本 / 会话摘要；排查时开 `VBMCP_DEBUG_LOG=1` 看每行请求与 WARN 级 `transport error` |
+
+### 8.6 严重缺陷修复：accept 阻塞导致服务器完全不响应（用户反馈：CodeBuddy 连不上）
+
+**现象**：设置窗体显示 running、TCP 能建立连接（日志有 `client connected`），
+但任何 HTTP 请求都得不到响应（`/health` 也超时），且断开后无
+`client disconnected` 日志 —— "连上了但拿不到任何数据"。
+
+**根因**（`mcp_http.cpp`）：监听 socket 为**阻塞模式**，而 accept 循环在
+`select` 报告可读后连续调用 `accept`；第二次 `accept`（此时已无等待连接）
+**永久阻塞整个网络线程**。此后所有 IO（读请求 / 发响应 / 检测断开）全部停摆；
+每个新连接只是把卡死的 `accept` 唤醒一次（打印一条 `client connected`）随即再次
+卡死。**该缺陷自阶段 D（网络层实现）起即存在**——代码里 recv/send 的
+`WSAEWOULDBLOCK` 分支本就齐全（说明原设计就是非阻塞），只是漏了模式设置，
+且此前从未做过真正的端到端连接验证（第七节清单一直是未勾选状态）。
+
+**修复**：
+
+1. 监听 socket 设 `ioctlsocket(FIONBIO)`：accept 循环能正常以
+   `WSAEWOULDBLOCK` 退出，不再阻塞；
+2. accept 出的连接 socket 显式设非阻塞（不依赖继承行为）：recv/send 的
+   `WSAEWOULDBLOCK` 分支按设计工作，顺带消除"慢客户端阻塞大响应 send"的隐患；
+3. `VBMCP_MAX_CONNECTIONS` 64 → 60：`fd_set` 还要放 listener，且 Windows 的
+   `FD_SET` 在满时会**静默忽略**新句柄（那些连接会不被 select 监视、静默挂起）。
+
+**验证**：新增 `tools/mcp_e2e`（本机把真实网络/RPC/工具代码跑成完整服务器，
+无需 VB Decompiler）+ `tools/e2e_test.ps1`（12 项断言）。修复后全部通过；
+修复前同一测试在 `/health` 一步即超时。已纳入 `tools/check_all.bat` 第 6 步。

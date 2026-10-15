@@ -172,7 +172,13 @@ curl http://127.0.0.1:3023/health
 tools\check_all.bat
 ```
 
-也可单独运行 `tools\selftest`（编码桥 / i18n / 工具 schema，26 项断言），
+也可单独运行：
+
+- `tools\selftest`（编码桥 / i18n / 工具 schema，26 项断言）；
+- `tools\e2e_test.ps1`（端到端 MCP 协议：health / initialize 版本协商 /
+  tools-list / ping / SSE / 错误面，12 项断言；在本机把真实服务器代码
+  跑起来测试，**无需 VB Decompiler**）。
+
 详见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 第 5 节。
 
 ### MCP 客户端配置
