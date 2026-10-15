@@ -1,42 +1,64 @@
 /*
-* config.cpp - 插件配置读写（Windows 注册表）
-*
-* 存储位置（与 VB Decompiler 自身的 Options 注册表项同级、互不干扰）：
-*   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
-*
-* 值：
+ * config.cpp - 插件配置读写（Windows 注册表）
+ * config.cpp - Plugin configuration storage (Windows registry)
+ *
+ * 存储位置（与 VB Decompiler 自身的 Options 注册表项同级、互不干扰）：
+ *   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
+ *
+ * Location (a sibling of VB Decompiler's own Options key, no interference):
+ *   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
+ *
+ * 值：
  *   Port         REG_DWORD 1..65535             (默认 3023)
  *   BindAddress  REG_SZ                         (默认 127.0.0.1)
  *   AllowWrite   REG_DWORD 0/1                  (默认 0 = 只读模式)
  *   CorsOrigins  REG_SZ 逗号分隔可信 origin 列表 (默认空 = 不返回任何 CORS 头)
  *
-*   EnableMcp    REG_SZ  （**历史遗留字段**，新版不再读写 —— 服务启用状态
-*                       由用户在 Plugins 设置窗体里点"确定"即时生效，
-*                       每次 VB Decompiler 启动默认禁用。旧值保留在注册表
-*                       里但被忽略，迁移无需手工清理。）
-*
-* UI 语言通过单独的子键读取（VB Decompiler 自己写入）：
-*   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\Options\CustomLanguage
-* 详见 i18n.cpp（I18N_LANG_REG_KEY / I18N_LANG_REG_VALUE）。
-*
-* 设计原则：
-*   - 不存在 / 字段缺失时返回默认值，不抛错。
-*   - RegOpenKey 在缺失子键时 CreateKey 自动建立，简化 "首次保存" 流程。
-*   - vbdmcp_config_load / save 在 DLL 主线程中调用，无须并发保护。
-*/
+ * Values:
+ *   Port         REG_DWORD 1..65535             (default 3023)
+ *   BindAddress  REG_SZ                         (default 127.0.0.1)
+ *   AllowWrite   REG_DWORD 0/1                  (default 0 = read-only)
+ *   CorsOrigins  REG_SZ comma-separated trusted origins (empty = no CORS headers)
+ *
+ * 服务启用状态不持久化：每次 VB Decompiler 启动都默认禁用，由用户在 Plugins
+ * 设置窗体里勾选启用（点"确定"即时生效）。
+ *
+ * The enabled state is not persisted: the server starts disabled on every
+ * VB Decompiler launch and is enabled explicitly in the Plugins settings dialog
+ * (takes effect on OK).
+ *
+ * UI 语言通过单独的子键读取（VB Decompiler 自己写入）：
+ *   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\Options\CustomLanguage
+ * 详见 i18n.cpp（I18N_LANG_REG_KEY / I18N_LANG_REG_VALUE）。
+ *
+ * The UI language comes from a separate subkey written by VB Decompiler itself;
+ * see i18n.cpp (I18N_LANG_REG_KEY / I18N_LANG_REG_VALUE).
+ *
+ * 设计原则：
+ *   - 不存在 / 字段缺失时返回默认值，不抛错。
+ *   - open_key(create=TRUE) 在缺失子键时自动建立，简化 "首次保存" 流程。
+ *   - vbdmcp_config_load / save 在 UI 主线程调用，无须并发保护。
+ *
+ * Design rules:
+ *   - Missing keys/values yield defaults, never an error.
+ *   - open_key(create=TRUE) creates the subkey on demand (simplifies first save).
+ *   - load / save run on the UI main thread, so no concurrency guard is needed.
+ */
 #include "vbdmcp.h"
 #include <stdio.h>
 
-/* 主键：与 VB Decompiler 自身的 Options 项同级，作为 MCP 子键 */
+/* 主键：与 VB Decompiler 自身的 Options 项同级，作为 MCP 子键
+ * Registry root: the MCP subkey lives next to VB Decompiler's own Options key */
 #define VBDMCP_REG_ROOT  HKEY_CURRENT_USER
 #define VBDMCP_REG_KEY   "SOFTWARE\\VB and VBA Program Settings\\VB Decompiler\\MCP"
-#define VBDMCP_VAL_ENABLE  "EnableMcp"
 #define VBDMCP_VAL_PORT    "Port"
 #define VBDMCP_VAL_BIND    "BindAddress"
 #define VBDMCP_VAL_ALLOW_WRITE "AllowWrite"
 #define VBDMCP_VAL_CORS    "CorsOrigins"
 
-/* 读 REG_SZ 到用户缓冲（不写默认值；仅在类型不符或失败时清空）。 */
+/* 读 REG_SZ 到用户缓冲（不写默认值；仅在类型不符或失败时清空）。
+ * Reads REG_SZ into the caller's buffer (never writes a default; clears the
+ * buffer when the type mismatches or the read fails). */
 static int reg_read_sz(HKEY hKey, const char *value, char *out, size_t cap)
 {
     if (!out || cap == 0) return 0;
@@ -45,7 +67,8 @@ static int reg_read_sz(HKEY hKey, const char *value, char *out, size_t cap)
     LSTATUS st = RegQueryValueExA(hKey, value, NULL, &type, (LPBYTE)out, &cb);
     if (st != ERROR_SUCCESS) return 0;
     if (type != REG_SZ && type != REG_EXPAND_SZ) { out[0] = '\0'; return 0; }
-    /* 确保 NUL 终止（RegQueryValueEx 通常会，但保险起见） */
+    /* 确保 NUL 终止（RegQueryValueEx 通常会，但保险起见）
+     * Make sure the string is NUL-terminated (RegQueryValueEx usually does). */
     if (cb > 0 && cb <= (DWORD)cap) out[cb - 1] = '\0';
     else out[cap - 1] = '\0';
     return 1;
@@ -75,7 +98,8 @@ static int reg_write_dw(HKEY hKey, const char *value, DWORD dw)
     return RegSetValueExA(hKey, value, 0, REG_DWORD, (const BYTE *)&dw, sizeof(dw)) == ERROR_SUCCESS;
 }
 
-/* 打开主键（不存在则创建）。返回 RegCloseKey 由调用方执行。 */
+/* 打开主键（不存在则创建）。返回 RegCloseKey 由调用方执行。
+ * Opens the main key (creates it when missing); the caller closes it with RegCloseKey. */
 static HKEY open_key(BOOL create)
 {
     HKEY hKey = NULL;
@@ -117,7 +141,7 @@ void vbdmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_w
     DWORD dw = 0;
     if (reg_read_dw(hKey, VBDMCP_VAL_PORT, &dw) && port) {
         if (dw > 0 && dw < 65536) *port = (int)dw;
-        else need_rewrite = TRUE;  /* 越界值 → 写回 */
+        else need_rewrite = TRUE;  /* 越界值 → 写回 / out-of-range value -> rewrite */
     } else {
         need_rewrite = TRUE;
     }
@@ -128,14 +152,18 @@ void vbdmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_w
         need_rewrite = TRUE;
     }
 
-    /* AllowWrite：缺失时用默认（只读）；不触发 rewrite，避免老用户被强制写入新键 */
+    /* AllowWrite：缺失时用默认（只读）；不触发 rewrite，避免老用户被强制写入新键
+     * AllowWrite: a missing value falls back to the default (read-only) without
+     * triggering a rewrite, so existing users are not forced to get a new value. */
     if (reg_read_dw(hKey, VBDMCP_VAL_ALLOW_WRITE, &dw) && allow_write) {
         *allow_write = (dw != 0) ? 1 : 0;
     }
 
     RegCloseKey(hKey);
 
-    /* 有任何缺失 / 越界 / 不可识别值 → 把当前（已用默认值填补的）结果写回注册表 */
+    /* 有任何缺失 / 越界 / 不可识别值 → 把当前（已用默认值填补的）结果写回注册表
+     * Any missing / out-of-range / unrecognized value -> write the resolved
+     * (default-filled) result back to the registry. */
     if (need_rewrite) {
         vbdmcp_config_save(port   ? *port   : VBDMCP_DEFAULT_PORT,
                           (bind_out && bind_out[0]) ? bind_out : VBDMCP_DEFAULT_BIND,
@@ -146,14 +174,12 @@ void vbdmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_w
 
 void vbdmcp_config_save(int port, const char *bind, int allow_write)
 {
-   
     HKEY hKey = open_key(TRUE);
     if (!hKey) {
         vbdmcp_log("config save: create/open key failed");
         return;
     }
 
-    /* 不写 EnableMcp 字段 —— 见上方说明 */
     reg_write_dw(hKey, VBDMCP_VAL_PORT, (DWORD)(port > 0 ? port : VBDMCP_DEFAULT_PORT));
     reg_write_sz(hKey, VBDMCP_VAL_BIND, (bind && *bind) ? bind : VBDMCP_DEFAULT_BIND);
     reg_write_dw(hKey, VBDMCP_VAL_ALLOW_WRITE, allow_write ? 1u : 0u);
@@ -163,7 +189,9 @@ void vbdmcp_config_save(int port, const char *bind, int allow_write)
               port, bind ? bind : VBDMCP_DEFAULT_BIND, allow_write ? 1 : 0);
 }
 
-/* 可信 CORS origin 列表（逗号分隔）。空串 = 未配置。允许 "*" 会被忽略。 */
+/* 可信 CORS origin 列表（逗号分隔）。空串 = 未配置；列表中的 "*" 会被忽略。
+ * Trusted CORS origin list (comma-separated). Empty = not configured; a "*"
+ * entry in the list is ignored. */
 void vbdmcp_config_get_cors_origins(char *out, size_t cap)
 {
     if (!out || cap == 0) return;

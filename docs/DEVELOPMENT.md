@@ -112,12 +112,29 @@
   `Brazilian Portuguese`、`Kurdish (sorani)` …），`I18n_LangFromName()` 原样匹配
   （大小写不敏感、去两端空白、另接受 `zh`/`ja`/`pt-BR` 两字母代码）；
   设置窗体每次打开前 `I18n_Refresh()` 重新读取。
-- **多语言已占位**：语言枚举见 `i18n.h` 的 `I18nLang`（24 种），映射表在
-  `i18n.cpp` 的 `kLangs`。目前**只有简体中文嵌了语言包**（`JSON_ZH`），其余语言
-  `I18n_LangHasPack()` 返回 0，`_()` 直接返回 msgid（英文原文），不会显示空白。
+- **多语言**：语言枚举见 `i18n.h` 的 `I18nLang`（24 种），映射表在
+  `i18n.cpp` 的 `kLangs`。除英文外**每种语言都已嵌入语言包**（`res/vbdmcp.rc`
+  里 23 条 `JSON_XX RCDATA`，与 `kLangs` 的 `resource` 列一一对应）；英文无需包
+  （msgid 本身就是英文）。没有包时 `I18n_LangHasPack()` 返回 0、`_()` 直接返回
+  msgid（英文原文），不会显示空白。
   新增语言三步：① 加 `lang_res/<code>.json`；② `res/vbdmcp.rc` 加一条
   `JSON_XX RCDATA`；③ `kLangs` 对应行填 `resource` 名（并跑
-  `extract_i18n.py` 同步词条）。
+  `extract_i18n.py` 同步词条）。`.vcxproj` 的 `VbdmcpPrepRc` 目标用通配复制
+  `lang_res\*.json` 到中间目录，所以做完 ① 不需要再动构建脚本。
+- **界面文本边界（改 UI 文本前必读 `i18n.h` 顶部）**：设置对话框是**Unicode 窗口**
+  （`DialogBoxParamW` / `CreateDialogParamW`，控件全是 Unicode），所以界面文案用
+  `_W()`/`_FW()`（UTF-16）或交给内部转宽的 `set_text()`/`set_text_utf8()`（吃 UTF-8）；
+  `_A()`/`_AF()`（ANSI/GBK）只用于**宿主 A 系列接口**（状态栏 `vbd_set_status`、
+  插件名/作者字段）。混用会把整串压成 '?'：波斯语/阿拉伯语/希伯来语在 CP936 上
+  完全不可表示（2026-10 的实测 bug：设置窗体满屏 `??????`）。
+  两个配套保障：① `.rc` 的对话框模板必须是 Unicode（rc.exe 生成的就是 UTF-16 模板，
+  由 `tools/verify_dialog_templates.ps1` 在构建后校验）；② `_A()` 遇到"译文在该
+  ANSI 代码页里表示不了"时**自动回退英文 msgid**，绝不把 '?' 串交给宿主界面。
+  界面字体按语言选族（`options_dialog.cpp` 的 `ui_font_face()`）：CJK → 微软雅黑，
+  其余（含波斯语/阿拉伯语）→ Segoe UI；没有任何单一字体族能覆盖全部 23 种语言。
+  已知限制：对话框不做 RTL 镜像（`WS_EX_LAYOUTRTL`），波斯语/希伯来语界面仍是
+  左对齐布局（文本本身按 RTL 正确渲染）；宿主 ANSI 接口（状态栏/插件名）在
+  这些语言下显示英文。
 - 语言包只从**资源**加载，**不做磁盘回退**：资源缺失直接回英文 msgid。
   （曾有 `load_from_file("lang_res\\zh.json")` 回退，会让开发机上的磁盘副本掩盖
   "RCDATA 没链进 DLL" 的打包问题——踩过：rc 漏了 `JSON_ZH` 一行，界面却仍是中文。）
@@ -230,7 +247,7 @@ MCP 报文（JSON）必须是 UTF-8，而 VB Decompiler 引擎的文本字段是
 |---|---|---|
 | `RC1004 unexpected end of file` | `#include` 进来的头文件带 `#define`，在 `DIALOGEX` 里用宏；或注释里混用 `/* */` 与 `//`、注释里有撇号 | ID 宏直接写在资源脚本里，C++ 侧头文件由 `tools/gen_ids_header.py` 生成；只用 `//` 注释，注释不写撇号 |
 | `RC2108 expected numerical dialog constant` | ① 资源名用宏（`IDD_X DIALOGEX`）；② `EDITTEXT/PUSHBUTTON` 后面跟 exstyle | 资源名写字面量 `2001 DIALOGEX`；控件一律用 `CONTROL` 语句 |
-| `RC2104 undefined keyword DS_SETFONT` | **VS 资源编辑器保存后**把 `.rc` 开头的 `#include <windows.h>` 换成了 `#include "resource.h"`，而那个文件只有 ID 常量，没有模板关键字（`DS_SETFONT` / `WS_*` / `ES_*` 都在 `winuser.h`） | 两个 `.vcxproj` 里的 `VbmcpPrepRc` 目标会生成 `$(IntDir)rc\vbdmcp_build.rc` 包装文件（先 `#include <windows.h>` 再 `#include` 真正的 rc），并把它替换进 `@(ResourceCompile)`——**不要去改 `resource.h` 加 include，编辑器每次保存都会重写它** |
+| `RC2104 undefined keyword DS_SETFONT` | **VS 资源编辑器保存后**把 `.rc` 开头的 `#include <windows.h>` 换成了 `#include "resource.h"`，而那个文件只有 ID 常量，没有模板关键字（`DS_SETFONT` / `WS_*` / `ES_*` 都在 `winuser.h`） | 两个 `.vcxproj` 里的 `VbdmcpPrepRc` 目标会生成 `$(IntDir)rc\vbdmcp_build.rc` 包装文件（先 `#include <windows.h>` 再 `#include` 真正的 rc），并把它替换进 `@(ResourceCompile)`——**不要去改 `resource.h` 加 include，编辑器每次保存都会重写它** |
 | 保存后 `.rc` 里找不到 ID 定义 | 编辑器把 ID 列表搬进了 `res/resource.h` | `tools/gen_ids_header.py` 同时扫 `res/vbdmcp.rc` 与 `res/resource.h`；改完 ID 跑一次生成 + `--check` |
 | `RC4005 HTERROR / PWR_FAIL / HTTRANSPARENT` 重定义警告 | VS 生成的 `resource.h` 里这三个宏与 `windows.h` 撞了（rc.exe 对"值相同"的重定义也报警），而 `resource.h` 不能加 include guard（会被重写） | 在**我们自己的包装 rc** 里 `#include <windows.h>` 之后 `#undef HTERROR / PWR_FAIL / HTTRANSPARENT`，让 `resource.h` 的定义成为首次定义（模板不用这三个宏）。包装里必须用 `<windows.h>` 而非更轻的 `<winresrc.h>`：后者宏集合不同，冲突会变成 `WM_KEYLAST`/`WM_MOUSELAST`/`_WIN32_WINNT`/`_WIN32_IE` 四条 |
 | `RC2104 undefined keyword WS_EX_CTRLACTIVE` | rc 预处理没有 `_WIN32_WINNT`，`winuser.h` 把该宏隐藏了 | 写 `0x00000020` 并加注释（C++ 侧同理，本地 `#define` 兜底） |
@@ -248,7 +265,7 @@ MCP 报文（JSON）必须是 UTF-8，而 VB Decompiler 引擎的文本字段是
 - ID 列表被搬到 `res/resource.h`，`.rc` 里改用 `#include "resource.h"`；
 - 自定义注释与 `#include <windows.h>` 会被**直接删掉**（实测），所以编译时不能直接用它：
   两个 `.vcxproj`（`vbdmcp.vcxproj`、`tools/ui_preview/ui_preview.vcxproj`）的
-  `VbmcpPrepRc` 目标会生成 `$(IntDir)rc\vbdmcp_build.rc`：
+  `VbdmcpPrepRc` 目标会生成 `$(IntDir)rc\vbdmcp_build.rc`：
 
   ```
   #include <windows.h>
@@ -393,9 +410,10 @@ _F("%d files, %zu bytes", 7, (size_t)1024);
 | `msbuild tools\mcp_e2e\mcp_e2e.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `tools\mcp_e2e\Win32\Debug\mcp_e2e\mcp_e2e.exe [port]` | 本机运行**完整 MCP 服务器**（真实传输/RPC/工具代码，无需 VB Decompiler，默认 `127.0.0.1:3024`）；`set VBDMCP_E2E_ALLOW_WRITE=1` 以读写模式启动 |
 | `powershell -File tools\e2e_test.ps1` | **端到端 MCP 协议测试**（16 项断言：health / initialize 版本协商 / tools-list / 端点路径 / ping / SSE 无 Content-Length + 心跳 / 406·415·404·405）；先构建 mcp_e2e。这类测试专门捕获"能连上但拿不到数据/流被误判结束"的传输层缺陷（见 REFACTOR_PROGRESS 8.6、8.7） |
 | `tools\check_all.bat` | 一键提交前检查：`gen_ids_header --check` + `extract_i18n --check` + 自测构建/运行 + Release 构建 + 端到端协议测试 |
-| `msbuild tools\ui_preview\ui_preview.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `ui_preview.exe [en]` | **不需要 VB Decompiler** 即可渲染真实设置窗体，并截图到 `%TEMP%\vbdmcp_ui_page*.bmp`（含"放大窗体后重排"的效果），同时把页窗口/页内控件坐标与消息转发结果写进 `%TEMP%\vbdmcp_ui_probe.txt`，改 UI 后用它做回归对比 |
+| `msbuild tools\ui_preview\ui_preview.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `ui_preview.exe [lang]` | **不需要 VB Decompiler** 即可渲染真实设置窗体，并截图到 `%TEMP%\vbdmcp_ui_page*.bmp`（含"放大窗体后重排"的效果），同时把页窗口/页内控件坐标与消息转发结果写进 `%TEMP%\vbdmcp_ui_probe.txt`，改 UI 后用它做回归对比。`lang` 是任意语言代码（`zh` 缺省 / `en` / `fa` / `de` / `ja` …）；验证非 ANSI 语言（波斯语等）的 Unicode 界面与字体必须用它（`ui_preview.exe fa`，截图里应看到波斯文而不是 `??????`） |
 | `python tools/gen_ids_header.py` / `--check` | 由 `res/vbdmcp.rc` 的 `#define` 生成 `src/vbdmcp_ids.h` / 校验两者一致（头文件是生成产物，不要手改） |
-| `powershell -File tools\\verify_i18n_resource.ps1` | 用 32 位宿主验证 `JSON_ZH` 已嵌入 DLL（必须 32 位宿主：64 位 PowerShell 加载 32 位 DLL 会报 193） |
+| `powershell -File tools\\verify_i18n_resource.ps1` | 用 32 位宿主逐个验证 **23 个语言包 RCDATA** 已嵌入 DLL（找到资源 + 大小与 `lang_res/*.json` 逐一相等 + 每条词条一行计数）。注意脚本**不用** `ConvertFrom-Json`：PowerShell 的字典键大小写不敏感，会把 `Out of memory` / `out of memory` 这种合法词条误判成重复键（必须 32 位宿主：64 位 PowerShell 加载 32 位 DLL 会报 193） |
+| `powershell -File tools\\verify_dialog_templates.ps1` | 用 32 位宿主验证 DLL 里的 3 个对话框模板是 **Unicode（UTF-16）** 模板 —— `DialogBoxParamW`/`CreateDialogParamW` 的前提；一旦 rc.exe 改输出 ANSI 模板，设置窗体标题与控件文案会整片乱码（同样必须 32 位宿主） |
 | `powershell -File %USERPROFILE%\\.codebuddy\\skills\\vs2019-rc-editor\\scripts\\check_rc_health.ps1 -RcPath res\\vbdmcp.rc -ProjectFile vbdmcp.vcxproj` | 资源脚本体检：rc 是否被资源编辑器接管 / 是否缺 `windows.h` / ID 是否同步 / 包装目标是否在位 / rc.exe 工具链自检（有 PROBLEM 时返回非 0）。通用规则见该 skill |
 
 ## 6. 新增 HTTP 端点的注意事项

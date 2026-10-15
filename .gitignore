@@ -1,5 +1,18 @@
 # 编译产物（构建输出目录与中间文件）
-Win32/
+#
+# Win32/ 是构建输出目录：整体忽略，但**只把生成的插件 DLL 入库**（方便直接取用，
+# 不必本地编译 MSVC 工程）。
+# 注意必须写成 "Win32/**"（内容级）+ 两条 ! 取回，不能写 "Win32/"（目录级）：
+# 一旦父目录被排除，git 不会再去检查子路径，! 规则对子文件无效。
+#
+# Build output directory: ignored as a whole, except for the built plugin DLL, which
+# is committed so it can be used without a local MSVC build.
+# This must be "Win32/**" (contents) plus two ! re-includes - "Win32/" (directory)
+# would make the negations useless, since git stops descending into an excluded
+# directory.
+Win32/**
+!Win32/Release/
+!Win32/Release/vbdmcp.dll
 *.obj
 *.pdb
 *.exp
@@ -12,13 +25,18 @@ Win32/
 .vs/
 *.aps
 
-# 工具链的输出目录（脚本与测试工程源码本身必须入库）
-tools/**/Debug/
-tools/**/Release/
+# 工具链目录（脚本、测试工程、UI 回归等）仅本机使用，整体不入库
+tools/
 
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 整包备份/快照（体积大且每次都变，不该进历史）
+# Full-tree backups/snapshots: large and rewritten every time - keep them out of history.
+*.rar
+*.7z
+*.zip
 
 # i18n 提取脚本的中间产物（语言包本身要提交）
 lang_res/untranslated*.txt

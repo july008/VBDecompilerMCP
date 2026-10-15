@@ -12,8 +12,33 @@ LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
 //
 // RCDATA
 //
+// 语言包：每种语言一条，资源名必须与 src/i18n.cpp 的 kLangs 表逐一对应（改一边记得改另一边）。
+// Language packs: one entry per language; the resource names must match the kLangs
+// table in src/i18n.cpp one by one (keep both sides in sync).
 
 JSON_ZH                 RCDATA                  "..\\lang_res\\zh.json"
+JSON_ZH_TW              RCDATA                  "..\\lang_res\\zh-TW.json"
+JSON_AR                 RCDATA                  "..\\lang_res\\ar.json"
+JSON_CS                 RCDATA                  "..\\lang_res\\cs.json"
+JSON_DA                 RCDATA                  "..\\lang_res\\da.json"
+JSON_DE                 RCDATA                  "..\\lang_res\\de.json"
+JSON_EL                 RCDATA                  "..\\lang_res\\el.json"
+JSON_ES                 RCDATA                  "..\\lang_res\\es.json"
+JSON_FA                 RCDATA                  "..\\lang_res\\fa.json"
+JSON_FR                 RCDATA                  "..\\lang_res\\fr.json"
+JSON_HE                 RCDATA                  "..\\lang_res\\he.json"
+JSON_ID                 RCDATA                  "..\\lang_res\\id.json"
+JSON_IT                 RCDATA                  "..\\lang_res\\it.json"
+JSON_JA                 RCDATA                  "..\\lang_res\\ja.json"
+JSON_KU                 RCDATA                  "..\\lang_res\\ku.json"
+JSON_NL                 RCDATA                  "..\\lang_res\\nl.json"
+JSON_PL                 RCDATA                  "..\\lang_res\\pl.json"
+JSON_PT                 RCDATA                  "..\\lang_res\\pt.json"
+JSON_PT_BR              RCDATA                  "..\\lang_res\\pt-BR.json"
+JSON_RU                 RCDATA                  "..\\lang_res\\ru.json"
+JSON_SK                 RCDATA                  "..\\lang_res\\sk.json"
+JSON_TR                 RCDATA                  "..\\lang_res\\tr.json"
+JSON_UK                 RCDATA                  "..\\lang_res\\uk.json"
 
 
 /////////////////////////////////////////////////////////////////////////////

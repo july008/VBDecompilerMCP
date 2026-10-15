@@ -1,8 +1,11 @@
 ﻿; vbdmcp.def - DLL 模块导出定义
+; vbdmcp.def - DLL module export definitions
 ;
-; VB Decompiler 通过 GetProcAddress 查找未修饰的函数名查找导出，
-; 这里我们用 __declspec(dllexport) + extern "C" 保证未修饰名，
-; 该文件仅作为保险保留。
+; VB Decompiler 用 GetProcAddress 按未修饰函数名查找导出；代码里已用
+; __declspec(dllexport) + extern "C" 保证未修饰名，本文件仅作保险保留。
+; VB Decompiler resolves exports by undecorated name via GetProcAddress; the
+; code already guarantees undecorated names through __declspec(dllexport) plus
+; extern "C", so this file is kept only as a safety net.
 
 LIBRARY "vbdmcp"
 EXPORTS

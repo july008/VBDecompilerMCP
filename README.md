@@ -135,11 +135,14 @@ HKCU\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
 ### 界面语言
 
 UI 语言跟随 VB Decompiler 主程序设置（注册表 `...\VB Decompiler\Options\CustomLanguage`）：
-`ChineseSimplified` → 简体中文；其他值/缺失 → 英文。覆盖菜单、设置窗体、MessageBox、帮助、AI 客户端接入向导，以及 MCP `tools/list` 描述与工具错误消息（UTF-8 JSON）。
+`ChineseSimplified` → 简体中文，`ChineseTraditional`/`Japanese`/`German`/`French`/… → 对应译文；
+未嵌入或未翻译的值 → 英文。覆盖菜单、设置窗体、MessageBox、帮助、AI 客户端接入向导，以及 MCP `tools/list` 描述与工具错误消息（UTF-8 JSON）。
 
-**国际化实现**：gettext 风格，源码里统一写 `_("English text")`，中文译文放在
-`lang_res/zh.json`，构建时以 `RCDATA("JSON_ZH")` **嵌入 vbdmcp.dll**
-（不依赖任何外部 langpack）。新增/修改文案后运行 `python tools/extract_i18n.py`
+**国际化实现**：gettext 风格，源码里统一写 `_("English text")`，译文放在
+`lang_res/<code>.json`（共 23 种：zh, zh-TW, ar, cs, da, de, el, es, fa, fr, he, id,
+it, ja, ku, nl, pl, pt-BR, pt, ru, sk, tr, uk），构建时各自以一条
+`RCDATA("JSON_XX")` **嵌入 vbdmcp.dll**（不依赖任何外部 langpack；英文无需包）。
+新增/修改文案后运行 `python tools/extract_i18n.py`
 自动同步语言包并生成待翻译清单；未翻译的词条运行时自动回退英文。详见
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#多语言i18n注意事项)。
 

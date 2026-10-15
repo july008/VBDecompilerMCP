@@ -132,9 +132,9 @@ Missing or out-of-range values fall back to defaults and are **written back auto
 
 ### UI language
 
-Follows VB Decompiler (`...\VB Decompiler\Options\CustomLanguage`): `ChineseSimplified` → Simplified Chinese; anything else/missing → English. Covers menu, settings dialog, message boxes, help, client onboarding guides, and MCP `tools/list` descriptions plus tool error messages (UTF-8 JSON).
+Follows VB Decompiler (`...\VB Decompiler\Options\CustomLanguage`): `ChineseSimplified` → Simplified Chinese, `ChineseTraditional`/`Japanese`/`German`/`French`/… → the matching translation; missing or untranslated values → English. Covers menu, settings dialog, message boxes, help, client onboarding guides, and MCP `tools/list` descriptions plus tool error messages (UTF-8 JSON).
 
-**How i18n works**: gettext style. Every string is written as `_("English text")` in the sources; Chinese translations live in `lang_res/zh.json`, embedded into `vbdmcp.dll` as `RCDATA("JSON_ZH")` at build time (no external langpack). Run `python tools/extract_i18n.py` after adding/changing text to sync the pack and produce a to-translate report; untranslated entries fall back to English at runtime.
+**How i18n works**: gettext style. Every string is written as `_("English text")` in the sources; translations live in `lang_res/<code>.json` (23 packs: zh, zh-TW, ar, cs, da, de, el, es, fa, fr, he, id, it, ja, ku, nl, pl, pt-BR, pt, ru, sk, tr, uk), each embedded into `vbdmcp.dll` as its own `RCDATA("JSON_XX")` at build time (no external langpack; English needs no pack). Run `python tools/extract_i18n.py` after adding/changing text to sync the packs and produce a to-translate report; untranslated entries fall back to English at runtime.
 
 ### Debug log
 

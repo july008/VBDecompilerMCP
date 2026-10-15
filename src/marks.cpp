@@ -1,9 +1,15 @@
 /*
  * marks.cpp - 函数标记实现（路径 / 文件格式 / 线程约定见 marks.h）
+ * marks.cpp - Function marks implementation (paths / format / threading: see marks.h)
  *
  * 所有文本在内存与文件中一律是 **UTF-8**（vbdmcp 自有数据，与工程的
  * ANSI/GBK 字节无关）；调用方负责在传入前把引擎文本转成 UTF-8。
  * 文件路径仍用 ANSI（与引擎返回的路径、Win32 A 系列 API 保持一致）。
+ *
+ * All text is **UTF-8** in memory and in the file (vbdmcp's own data, unrelated
+ * to the project's ANSI/GBK bytes); callers convert engine text to UTF-8 before
+ * passing it in. File paths stay ANSI (consistent with engine-returned paths and
+ * with Win32 A APIs).
  */
 #include "marks.h"
 #include "vbdmcp.h"
@@ -21,20 +27,23 @@ namespace {
 
 struct MarkEntry {
     std::string mark;      /* UTF-8 */
-    std::string name;      /* UTF-8，附加信息（可选） */
-    std::string address;   /* ASCII，如 "0x89CB90"（可选） */
-    std::string updated;   /* 本地时间戳 */
+    std::string name;      /* UTF-8，附加信息（可选）/ UTF-8, extra info (optional) */
+    std::string address;   /* ASCII，如 "0x89CB90"（可选）/ ASCII, e.g. "0x89CB90" (optional) */
+    std::string updated;   /* 本地时间戳 / local timestamp */
 };
 
 std::map<std::string, MarkEntry> g_marks;   /* key = "module_index,function_index" */
 
-/* 已加载状态（用于 mtime 感知的缓存失效） */
-std::string g_loaded_app;                   /* 被分析程序路径（ANSI） */
-std::string g_loaded_file;                  /* 实际使用的标记文件（ANSI） */
+/* 已加载状态（用于 mtime 感知的缓存失效）
+ * Loaded state (used for mtime-aware cache invalidation) */
+std::string g_loaded_app;                   /* 被分析程序路径（ANSI）/ analyzed program path (ANSI) */
+std::string g_loaded_file;                  /* 实际使用的标记文件（ANSI）/ marks file in use (ANSI) */
 FILETIME    g_loaded_mtime = { 0, 0 };
 int         g_loaded_valid = 0;
 
-/* marks_file_path / marks_get 的返回缓冲：轮转 4 个槽位，避免相邻调用互相覆盖。 */
+/* marks_file_path / marks_get 的返回缓冲：轮转 4 个槽位，避免相邻调用互相覆盖。
+ * Return buffers for marks_file_path / marks_get: 4 rotating slots so adjacent
+ * calls do not overwrite each other. */
 const char *rot(const std::string& s, int slot)
 {
     static std::string bufs[4];
@@ -60,7 +69,8 @@ void stamp_now(std::string *out)
     *out = b;
 }
 
-/* 被分析程序路径（引擎返回 ANSI/GBK 字节） */
+/* 被分析程序路径（引擎返回 ANSI/GBK 字节）
+ * Path of the analyzed program (the engine returns ANSI/GBK bytes). */
 std::string app_path_ansi(void)
 {
     char *fn = vbd_get_value(VBD_GetFileName, 0, 0);
@@ -106,7 +116,7 @@ std::string temp_dir(void)
 std::string fallback_path(const std::string& app)
 {
     const std::string d = temp_dir() + "\\vbdmcp_marks";
-    CreateDirectoryA(d.c_str(), NULL);      /* 已存在时返回失败，忽略 */
+    CreateDirectoryA(d.c_str(), NULL);      /* 已存在时返回失败，忽略 / fails when it already exists, ignored */
     return d + "\\vbdmcp_marks_" + base_of(app) + ".json";
 }
 
@@ -120,7 +130,14 @@ std::string primary_path(const std::string& app)
 /* 决定当前使用哪个文件：
  *   1) 首选存在     → 首选；
  *   2) 回退存在     → 回退（说明之前写过、但首选目录不可写）；
- *   3) 都不存在     → 首选（首次保存失败时会自动改用回退并记住）。 */
+ *   3) 都不存在     → 首选（首次保存失败时会自动改用回退并记住）。
+ *
+ * Chooses which file to use:
+ *   1) primary exists  -> primary;
+ *   2) fallback exists -> fallback (written before while the primary folder was
+ *      not writable);
+ *   3) neither exists  -> primary (a failed first save switches to the fallback
+ *      and remembers it). */
 std::string resolve_path(const std::string& app)
 {
     if (app.empty()) return std::string();
@@ -149,7 +166,7 @@ void load_from(const std::string& path)
     size_t len = buf.size();
     if (len >= 3 && (unsigned char)p[0] == 0xEF &&
         (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) {
-        p += 3; len -= 3;                      /* 去 UTF-8 BOM */
+        p += 3; len -= 3;                      /* 去 UTF-8 BOM / strip the UTF-8 BOM */
     }
 
     yyjson_doc *doc = yyjson_read(p, len, YYJSON_READ_NOFLAG);
@@ -176,7 +193,8 @@ void load_from(const std::string& path)
     yyjson_doc_free(doc);
 }
 
-/* 缓存失效检查：项目变化 / 文件位置变化 / mtime 变化 → 重新加载 */
+/* 缓存失效检查：项目变化 / 文件位置变化 / mtime 变化 → 重新加载
+ * Cache invalidation: project, file location or mtime changed -> reload. */
 void ensure_loaded(void)
 {
     const std::string app  = app_path_ansi();
@@ -199,7 +217,8 @@ void ensure_loaded(void)
     load_from(path);
 }
 
-/* 序列化全部标记为 UTF-8 JSON（new alloc，调用方 vbdmcp_free）。 */
+/* 序列化全部标记为 UTF-8 JSON（new alloc，调用方 vbdmcp_free）。
+ * Serializes all marks as UTF-8 JSON (new alloc, caller frees with vbdmcp_free). */
 char *serialize_all(void)
 {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -207,7 +226,8 @@ char *serialize_all(void)
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
-    char *app_u8  = vbdmcp_acp_to_utf8(g_loaded_app.c_str());   /* 路径是 ANSI，文件内转 UTF-8 */
+    char *app_u8  = vbdmcp_acp_to_utf8(g_loaded_app.c_str());   /* 路径是 ANSI，文件内转 UTF-8
+                                                                   paths are ANSI; convert to UTF-8 for the file */
     char *file_u8 = vbdmcp_acp_to_utf8(g_loaded_file.c_str());
     yyjson_mut_obj_add_strcpy(doc, root, "app", base_of(g_loaded_app).c_str());
     yyjson_mut_obj_add_strcpy(doc, root, "app_path", app_u8 ? app_u8 : "");
@@ -238,7 +258,9 @@ char *serialize_all(void)
     return s;
 }
 
-/* 原子写入：先写 <path>.tmp，再 MoveFileEx 替换目标。返回 1 = 成功。 */
+/* 原子写入：先写 <path>.tmp，再 MoveFileEx 替换目标。返回 1 = 成功。
+ * Atomic write: write <path>.tmp first, then MoveFileEx onto the target.
+ * Returns 1 on success. */
 int write_atomic(const std::string& path, const char *data)
 {
     if (path.empty() || !data) return 0;
@@ -264,7 +286,9 @@ int save_current(void)
 
     int ok = write_atomic(g_loaded_file, data);
     if (!ok) {
-        /* 首选目录不可写（典型：Program Files 下的程序）→ 回退 %TEMP% 并记住 */
+        /* 首选目录不可写（典型：Program Files 下的程序）→ 回退 %TEMP% 并记住
+         * Primary folder not writable (typical: a program under Program Files)
+         * -> fall back to %TEMP% and remember it. */
         const std::string fb = fallback_path(g_loaded_app);
         if (!fb.empty() && fb != g_loaded_file && write_atomic(fb, data)) {
             g_loaded_file = fb;
@@ -276,12 +300,14 @@ int save_current(void)
     if (ok) {
         FILETIME ft = { 0, 0 };
         file_mtime(g_loaded_file, &ft);
-        g_loaded_mtime = ft;      /* 更新缓存基准，避免自己的写入触发重载 */
+        g_loaded_mtime = ft;      /* 更新缓存基准，避免自己的写入触发重载
+                                     refresh the cache baseline so our own write does not trigger a reload */
     }
     return ok;
 }
 
-/* marks_enum 的排序项（按 module, function 数值序） */
+/* marks_enum 的排序项（按 module, function 数值序）
+ * Sort item for marks_enum (numeric order by module, function). */
 struct EnumItem {
     int m;
     int f;
@@ -295,7 +321,7 @@ bool enum_less(const EnumItem& a, const EnumItem& b)
 
 } // namespace
 
-/* ---------------- 对外接口 ---------------- */
+/* ---------------- 对外接口 / Public API ---------------- */
 
 const char *marks_file_path(void)
 {
@@ -325,7 +351,7 @@ int marks_set(int module_index, int function_index,
 
 int marks_set_many(const marks_item *items, int count)
 {
-    if (!items || count <= 0) return 1;         /* 空批 = 无事可做 */
+    if (!items || count <= 0) return 1;         /* 空批 = 无事可做 / empty batch = nothing to do */
     ensure_loaded();
 
     std::string now;
@@ -333,7 +359,7 @@ int marks_set_many(const marks_item *items, int count)
     for (int i = 0; i < count; i++) {
         const std::string k = key_of(items[i].module_index, items[i].function_index);
         if (!items[i].mark || !*items[i].mark) {
-            g_marks.erase(k);                   /* 空串 = 取消标记 */
+            g_marks.erase(k);                   /* 空串 = 取消标记 / empty string = clear the mark */
         } else {
             MarkEntry e;
             e.mark = items[i].mark;
@@ -343,7 +369,7 @@ int marks_set_many(const marks_item *items, int count)
             g_marks[k] = e;
         }
     }
-    return save_current();                      /* 只写盘一次 */
+    return save_current();                      /* 只写盘一次 / write the file once */
 }
 
 int marks_enum(marks_enum_fn fn, void *user)

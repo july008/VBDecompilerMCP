@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -130,26 +130,36 @@
     <!-- res/vbdmcp.rc is owned by the Visual Studio resource editor: every save
          rewrites the whole file and drops "#include <windows.h>", which rc.exe
          needs for the DIALOGEX keywords (DS_SETFONT / WS_* / ES_* / BS_* ...).
-         So it is NOT compiled directly: the VbmcpPrepRc target below builds a
+         So it is NOT compiled directly: the VbdmcpPrepRc target below builds a
          wrapper that pulls windows.h in first and then includes it verbatim,
          which lets the UI be edited in the resource editor without breaking
          the build. -->
     <ResourceCompile Include="res\vbdmcp.rc" />
   </ItemGroup>
   <PropertyGroup>
-    <BeforeResourceCompileTargets>$(BeforeResourceCompileTargets);VbmcpPrepRc</BeforeResourceCompileTargets>
+    <BeforeResourceCompileTargets>$(BeforeResourceCompileTargets);VbdmcpPrepRc</BeforeResourceCompileTargets>
   </PropertyGroup>
-  <Target Name="VbmcpPrepRc">
+  <Target Name="VbdmcpPrepRc">
     <MakeDir Directories="$(IntDir)rc" />
-    <!-- rc.exe resolves a RCDATA file name relative to the file being compiled,
-         which here is $(IntDir)rc\vbdmcp_build.rc. The language pack therefore
-         has to sit one level above it for the "..\lang_res\zh.json" path that
-         vbdmcp.rc uses to keep resolving. -->
-    <Copy SourceFiles="$(ProjectDir)lang_res\zh.json"
+    <!-- rc.exe 只按"被编译的 rc 文件所在目录"解析 RCDATA 文件名，而这里编译的是
+         中间文件 $(IntDir)rc\vbdmcp_build.rc，所以语言包必须复制到它上一级的
+         $(IntDir)lang_res\ 下，vbdmcp.rc 里的 "..\lang_res\xx.json" 才解析得到。
+         通配复制该目录下所有 .json：新增语种只需改 .rc 与 src/i18n.cpp 的 kLangs 表。
+
+         rc.exe resolves a RCDATA file name relative to the file being compiled,
+         which here is $(IntDir)rc\vbdmcp_build.rc, so the language packs must be
+         copied into $(IntDir)lang_res\ (one level above it) for the
+         "..\lang_res\xx.json" paths used by vbdmcp.rc. The wildcard copies every
+         .json there, so adding a language only touches the .rc and the kLangs
+         table in src/i18n.cpp. -->
+    <ItemGroup>
+      <VbdmcpLangPack Include="$(ProjectDir)lang_res\*.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(VbdmcpLangPack)"
           DestinationFolder="$(IntDir)lang_res"
           SkipUnchangedFiles="true" />
     <PropertyGroup>
-      <VbmcpRcWrapper>/* 由 VbmcpPrepRc 生成，勿手改（每次构建都会重写）。
+      <VbdmcpRcWrapper>/* 由 VbdmcpPrepRc 生成，勿手改（每次构建都会重写）。
    1) 先引入 DIALOGEX 模板关键字（DS_SETFONT / WS_* / ES_* ... 都在 windows.h 里）。
       注意：VS 资源编辑器保存时会删掉 .rc 里的 #include &lt;windows.h&gt;，所以只能在这里补。
       用 windows.h 而不是更轻的 winresrc.h：后者带来的宏集合不同，冲突反而更多。
@@ -160,10 +170,10 @@
 #undef HTERROR
 #undef PWR_FAIL
 #undef HTTRANSPARENT
-#include &quot;$(ProjectDir)res\vbdmcp.rc&quot;</VbmcpRcWrapper>
+#include &quot;$(ProjectDir)res\vbdmcp.rc&quot;</VbdmcpRcWrapper>
     </PropertyGroup>
     <WriteLinesToFile File="$(IntDir)rc\vbdmcp_build.rc"
-                      Lines="$(VbmcpRcWrapper)"
+                      Lines="$(VbdmcpRcWrapper)"
                       Overwrite="true"
                       WriteOnlyWhenDifferent="true" />
     <ItemGroup>
