@@ -20,6 +20,7 @@
 #include "mcp_tools.h"
 #include "vbmcp.h"
 #include "i18n.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -348,6 +349,20 @@ static ModuleNameCache g_module_cache;
 /* 每次写工具执行后自增：使模块名缓存失效（改名/写工程都可能改变列表） */
 static unsigned g_write_generation = 0;
 
+/* VB 标识符规则：字母或下划线开头，仅含字母 / 数字 / 下划线。
+ * 用于过滤 GetModuleName 遍历到列表末尾时返回的 GUI 装饰项 ——
+ * 实测在列表尾部会返回 "End of forms :)"（含空格/冒号/括号），
+ * 若不过滤会被当成一个模块（28 → 实际 27）。 */
+static int is_vb_identifier(const char *s)
+{
+    if (!s || !*s) return 0;
+    if (!(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
+    for (const char *p = s + 1; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 0;
+    }
+    return 1;
+}
+
 /* 探测并缓存模块名列表。返回的指针在下次失效前有效。 */
 static const std::vector<std::string> *get_module_names(void)
 {
@@ -362,7 +377,10 @@ static const std::vector<std::string> *get_module_names(void)
         for (int i = 0; i < VBMCP_MAX_MODULES; i++) {
             char *name = vb_get_value(VB_GetModuleName, i, 0);
             if (!name || !*name) { if (name) vbmcp_free(name); break; }
-            g_module_cache.names.emplace_back(name);
+            /* 只收合法 VB 标识符：列表末尾的 GUI 装饰项（如 "End of forms :)"）
+             * 不是模块。用 continue 而不是 break —— 万一中间出现异常条目，
+             * 也不会丢掉它后面的模块。 */
+            if (is_vb_identifier(name)) g_module_cache.names.emplace_back(name);
             vbmcp_free(name);
         }
         g_module_cache.key = key;
