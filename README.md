@@ -159,10 +159,10 @@ curl http://127.0.0.1:3023/health
 ```
 
 ```json
-{"status":"ready","server":{"name":"VB Decompiler MCP Server","version":"2.0.0","protocolVersion":"2025-03-26"},"instances":[{"name":"VB Decompiler.exe","arch":"Win32","bits":32,"path":"C:\\...","pid":1234,"local":true,"state":"ready","readOnly":true,"tools_count":13}],"ready":1}
+{"status":"ready","server":{"name":"VB Decompiler MCP Server","version":"2.0.0","protocolVersion":"2025-03-26"},"instances":[{"name":"VB Decompiler.exe","arch":"Win32","bits":32,"path":"C:\\...","pid":1234,"local":true,"state":"ready","readOnly":true,"tools_count":15}],"ready":1}
 ```
 
-`readOnly:true` + `tools_count:14` 表示处于只读模式（勾选写入权限后为 `false` + `29`）。
+`readOnly:true` + `tools_count:15` 表示处于只读模式（勾选写入权限后为 `false` + `31`）。
 
 ### 自测（无需 VB Decompiler 宿主）
 

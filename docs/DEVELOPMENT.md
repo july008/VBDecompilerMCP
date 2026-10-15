@@ -29,7 +29,7 @@
    `python tools/extract_i18n.py` 同步语言包；如涉及结构变化再更新
    `docs/REFACTOR_PROGRESS.md`。
 
-### 当前工具清单（29 = 14 只读 + 15 写入；完整说明与参数见 README.md 的工具表格）
+### 当前工具清单（31 = 15 只读 + 16 写入；完整说明与参数见 README.md 的工具表格）
 
 只读：`vbd_read_project_info`、`vbd_read_project_text`、`vbd_read_list_forms`、`vbd_read_form`、
 `vbd_read_list_modules`、`vbd_read_module`、`vbd_read_list_module_functions`、`vbd_read_function`、
@@ -49,7 +49,8 @@
 |---|---|---|
 | `mcp_http.cpp` | Streamable HTTP / SSE、后台网络线程、`UiTask` 队列、超时/取消、限流 | **绝对不允许**（只做传输层） |
 | `mcp_rpc.cpp` | JSON-RPC 2.0 分发、协议层错误、会话准入授权弹窗 | 允许（本身就在 UI 主线程执行） |
-| `mcp_tools.cpp` | 工具表 + 29 个工具实现 + 权限二次校验 | 允许（必须在 UI 主线程执行） |
+| `mcp_tools.cpp` | 工具表 + 31 个工具实现 + 权限二次校验 | 允许（必须在 UI 主线程执行） |
+| `marks.cpp` | 函数标记（vbdmcp 自有数据：与被分析程序同目录的 `vbdmcp_marks_<exe>.json`；目录不可写时回退 `%TEMP%`） | 允许（随工具在 UI 线程） |
 | `vbdec_sdk.cpp` | Callback Engine 封装（`vbd_get_value` / `vbd_set_value` / `vbd_set_status`） | 允许，且必须**只在 UI 主线程**调用 |
 | `options_dialog.cpp` | 设置窗体（`SysTabControl32` 双属性页：服务设置 / 接入信息；写入权限、局域网警告、AI 客户端向导） | 允许（UI 主线程） |
 | `i18n.h / i18n.cpp` | gettext 风格翻译：`_()` / `_A()` / `_F()` / `_AF()`，加载 zh.json 资源、khash 查表、GBK 轮转缓冲 | 只读取文本（UI 主线程） |

@@ -20,6 +20,7 @@
 #include "mcp_tools.h"
 #include "vbdmcp.h"
 #include "i18n.h"
+#include "marks.h"      /* 函数标记（分析进度跟踪，vbdmcp 自有数据） */
 #include <ctype.h>
 #include <stdio.h>
 #include <string>
@@ -610,6 +611,11 @@ static char *tool_read_function(yyjson_val *args, int *out_err)
     add_text(doc, root, "code_fast", code_fast ? code_fast : "", enc);
     add_text(doc, root, "string_references", str_ref ? str_ref : "", enc);
     add_text(doc, root, "disassembly", disasm ? disasm : "", enc);
+    /* 已标记时带出 mark（vbdmcp 自有数据，本身是 UTF-8，不经编码桥） */
+    {
+        const char *mk = marks_get(midx, fidx);
+        if (mk && *mk) yyjson_mut_obj_add_strcpy(doc, root, "mark", mk);
+    }
     add_encoding_field(doc, root, enc);
 
     vbdmcp_free(name);
@@ -728,6 +734,10 @@ static char *tool_find_function(yyjson_val *args, int *out_err)
                         _snprintf_s(hex, sizeof(hex), _TRUNCATE, "0x%llX", (unsigned long long)addr);
                         yyjson_mut_obj_add_strcpy(doc, o, "address_hex", hex);
                     }
+                    {
+                        const char *mk = marks_get(mi, (int)fi);
+                        if (mk && *mk) yyjson_mut_obj_add_strcpy(doc, o, "mark", mk);
+                    }
                     yyjson_mut_arr_add_val(arr, o);
                     emitted++;
                 }
@@ -739,6 +749,125 @@ static char *tool_find_function(yyjson_val *args, int *out_err)
 
     apply_pagination(doc, root, "matches", arr, total, offset, limit);
     if (truncated) yyjson_mut_obj_add_bool(doc, root, "truncated", 1);
+    return doc_to_string(doc);
+}
+
+/* -------- vbd_read_marks --------
+ * 列出当前项目已标记的函数（vbdmcp 自有数据，见 marks.h）。
+ * mark / name 本身是 UTF-8，**不经编码桥**（add_text 是给引擎 ANSI 数据用的）。 */
+struct MarkCollect {
+    yyjson_mut_doc *doc;
+    yyjson_mut_val *arr;
+    long long limit;
+    long long offset;
+    long long seen;
+    long long emitted;
+};
+
+/* marks_enum 回调：跳过前 offset 条，收集 limit 条。
+ * 始终返回 1（继续枚举）—— 为了让 marks_enum 返回准确的总数。 */
+static int marks_collect_cb(int m, int f, const char *mark, const char *name,
+                            const char *addr, void *user)
+{
+    MarkCollect *c = (MarkCollect *)user;
+    c->seen++;
+    if (c->seen > c->offset && c->emitted < c->limit) {
+        yyjson_mut_val *o = yyjson_mut_obj(c->doc);
+        yyjson_mut_obj_add_int(c->doc, o, "module_index", m);
+        yyjson_mut_obj_add_int(c->doc, o, "function_index", f);
+        if (mark && *mark) yyjson_mut_obj_add_strcpy(c->doc, o, "mark", mark);
+        if (name && *name) yyjson_mut_obj_add_strcpy(c->doc, o, "name", name);
+        if (addr && *addr) yyjson_mut_obj_add_strcpy(c->doc, o, "address", addr);
+        yyjson_mut_arr_add_val(c->arr, o);
+        c->emitted++;
+    }
+    return 1;
+}
+
+static char *tool_read_marks(yyjson_val *args, int *out_err)
+{
+    (void)arg_encoding(args);   /* 标记数据本身就是 UTF-8，无编码选项影响 */
+    long long limit = arg_int(args, "limit", 50);
+    long long offset = arg_int(args, "offset", 0);
+    if (limit < 1) limit = 1;
+    if (limit > 1000) limit = 1000;
+    if (offset < 0) offset = 0;
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+
+    MarkCollect collect;
+    collect.doc = doc;
+    collect.arr = arr;
+    collect.limit = limit;
+    collect.offset = offset;
+    collect.seen = 0;
+    collect.emitted = 0;
+
+    const long long total = marks_enum(marks_collect_cb, &collect);
+
+    apply_pagination(doc, root, "marks", arr, total, offset, limit);
+
+    const char *file = marks_file_path();
+    char *file_u8 = vbdmcp_acp_to_utf8(file ? file : "");
+    if (file_u8) {
+        yyjson_mut_obj_add_strcpy(doc, root, "marks_file", file_u8);
+        vbdmcp_free(file_u8);
+    }
+    return doc_to_string(doc);
+}
+
+/* -------- vbd_write_mark_function --------
+ * 设置 / 清除函数标记。**不写入工程**（vbdmcp 自有数据），
+ * 因此在 native 项目上同样可用（与 vbd_write_rename_function 的限制不同）。 */
+static char *tool_write_mark_function(yyjson_val *args, int *out_err)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int midx = arg_index(args, "module_index", -1);
+    int fidx = arg_index(args, "function_index", -1);
+    if (midx < 0 || fidx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if ((long long)midx >= module_total() ||
+        (long long)fidx >= module_function_total(midx)) {
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
+            _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
+               module_function_total(midx)));
+    }
+    const char *mark = arg_str(args, "mark");      /* 缺省 / 空串 = 清除 */
+
+    /* name/address 作为人类可读的附加信息随标记一起存（引擎是 ANSI → 转 UTF-8） */
+    char *nm = vbd_get_value(VBD_GetModuleFunctionName, midx, fidx);
+    char *ad = vbd_get_value(VBD_GetModuleFunctionAddress, midx, fidx);
+    char *nm_u8 = vbdmcp_acp_to_utf8(nm ? nm : "");
+    char hex[32] = { 0 };
+    if (ad) {
+        const long long a = parse_uint_base(ad, 10);
+        if (a >= 0) _snprintf_s(hex, sizeof(hex), _TRUNCATE, "0x%llX", (unsigned long long)a);
+    }
+    if (nm) vbdmcp_free(nm);
+    if (ad) vbdmcp_free(ad);
+
+    const int ok = marks_set(midx, fidx, mark ? mark : "", nm_u8, hex);
+    if (nm_u8) vbdmcp_free(nm_u8);
+    if (!ok) {
+        return err_json(out_err, VBDMCP_ERR_BUSINESS,
+            _("Cannot write the marks file; check that the program's folder (or %TEMP%) is writable"));
+    }
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "module_index", midx);
+    yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
+    yyjson_mut_obj_add_strcpy(doc, root, "mark", mark ? mark : "");
+    const char *file = marks_file_path();
+    char *file_u8 = vbdmcp_acp_to_utf8(file ? file : "");
+    if (file_u8) {
+        yyjson_mut_obj_add_strcpy(doc, root, "marks_file", file_u8);
+        vbdmcp_free(file_u8);
+    }
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
@@ -1178,6 +1307,7 @@ typedef struct {
 /* 查找类工具的分页参数：默认 50 / 上限 1000（比列表工具的 100/10000 更小 ——
  * 搜索命中通常会喂给 vbd_read_function 逐条读取，一次给太多会灌爆上下文）。 */
 #define P_FIND_PAGING   (1u << 14)
+#define P_MARK          (1u << 15)   /* 函数标记文本（自由文本；空串/缺省 = 清除） */
 
 static const tool_entry_t g_tools[] = {
     /* ---- 只读 ---- */
@@ -1190,6 +1320,7 @@ static const tool_entry_t g_tools[] = {
     { "vbd_read_list_module_functions", _("List all functions in the specified module. Supports pagination. Returns {module_index, count, functions:[{name,address,index}...]}."), P_MODULE_INDEX | P_PAGING,        0, 0, 1, tool_read_list_module_functions },
     { "vbd_read_function",            _("Get a function's decompiled code plus multiple views (fast/disassembly/string references). Returns {module_index, function_index, name, address, code, code_fast, disassembly, string_references}."),           P_MODULE_INDEX | P_FUNCTION_INDEX, 0, 0, 1, tool_read_function },
     { "vbd_find_function",            _("Find functions by name substring (case-insensitive) or by address, accepting the display form shown by VB Decompiler (e.g. \"Proc_4_51_89CB90\", \"Command5\", \"0x89CB90\", \"9030544\"). Returns {count, total_count, matches:[{module_index, module_name, function_index, name, address, address_hex}]}; feed module_index + function_index to vbd_read_function."),           P_QUERY | P_MODULE_INDEX | P_FIND_PAGING, 0, 0, 1, tool_find_function },
+    { "vbd_read_marks",               _("List the functions marked in this project. Marks are vbdmcp's own data, stored next to the analyzed program (see marks_file) and NOT written into the project. Returns {count, total_count, marks:[{module_index, function_index, mark, name, address}], marks_file}."),           P_FIND_PAGING, 0, 0, 1, tool_read_marks },
     { "vbd_read_sub_main",            _("Get the code of the program entry point Sub Main. No parameters."),           0,                                 0, 0, 1, tool_read_sub_main },
     { "vbd_read_active_text",         _("Get the text of the currently active code window (editor)."),        0,                                 0, 0, 1, tool_read_active_text },
     { "vbd_read_active_disasm_text",  _("Get the raw text of the active disassembly window."), 0,                                 0, 0, 1, tool_read_active_disasm_text },
@@ -1204,6 +1335,7 @@ static const tool_entry_t g_tools[] = {
     { "vbd_write_module",             _("Replace the module's declarations header."),             P_MODULE_INDEX | P_DECLARATIONS,   1, 1, 1, tool_write_module },
     { "vbd_write_module_string_references", 0,                       P_MODULE_INDEX | P_STRING_REFS,    1, 1, 1, tool_write_module_string_references },
     { "vbd_write_function",           _("Replace a function's code."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_CODE, 1, 1, 1, tool_write_function },
+    { "vbd_write_mark_function",      _("Set or clear a mark on a function (free-form text, e.g. \"analyzed: crypto entry\"); pass an empty mark to clear. Marks live in vbdmcp's own file next to the analyzed program, so this also works on native-compiled projects; vbd_read_function / vbd_find_function / vbd_read_marks then report the mark."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_MARK, 1, 0, 1, tool_write_mark_function },
     { "vbd_write_rename_function",    _("Rename a function."),        P_MODULE_INDEX | P_FUNCTION_INDEX | P_NEW_NAME, 1, 0, 1, tool_write_rename_function },
     { "vbd_write_sub_main",           _("Set the Sub Main code."),           P_CODE,                            1, 1, 1, tool_write_sub_main },
     { "vbd_write_active_text",        _("Set the text of the currently active code window. Automatically calls UpdateAll."),        P_TEXT,                            1, 0, 1, tool_write_active_text },
@@ -1386,6 +1518,9 @@ static void add_params(yyjson_mut_doc *doc, yyjson_mut_val *props, unsigned flag
         param_int(doc, props, "limit",  1, 1000, 50, _("Maximum number of items to return"));
         param_int(doc, props, "offset", 0, 0,     0, _("Start offset"));
     }
+    if (flags & P_MARK)
+        param_str(doc, props, "mark",
+                  _("Free-form mark text for this function (e.g. \"analyzed: crypto entry\"). Pass an empty string to clear the mark. Marks are stored by vbdmcp next to the analyzed program (see marks_file) and are NOT written into the project."));
     if (flags & P_OPTIONS) {
         param_onoff(doc, props, "stack_check");
         param_onoff(doc, props, "analyzer_check");

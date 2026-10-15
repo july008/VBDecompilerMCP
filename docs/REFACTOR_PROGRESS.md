@@ -273,7 +273,7 @@
 
 由于插件依赖 VB Decompiler 主进程，以下项目需在装有 VB Decompiler 的机器上实测：
 
-- [ ] 默认配置启动：`/health` 返回 `readOnly:true`、`tools_count=13`
+- [ ] 默认配置启动：`/health` 返回 `readOnly:true`、`tools_count=15`
 - [ ] `tools/list` 只返回 13 个 `vbd_read_*`
 - [ ] 设置窗体「服务设置」页勾选「允许写入」→ 「权限模式」显示读写 → 切到「接入信息」页后 `tools/list` 返回 28 个工具
 - [ ] 首个 `tools/call` 弹窗：选择「是」后可调用，`选择「否」后所有 callTool 返回 `-32001`
@@ -475,3 +475,25 @@ GUI 随之变空。**读取本身没有副作用，越界才是。**
 
 **验证**（真机，MCP 调用前后对比坐标）：连续读取两个不同函数（`{2,8}`、`{1,20}`）
 后，`active_coords` 均保持读取前的 `26,7` **不变**；修复前同样的操作会把它切走。
+
+### 8.10 新功能：函数标记（分析进度跟踪，用户需求）
+
+**需求**（用户）：把"某函数已分析"这类标记持久化到**被分析程序所在目录**，
+文件名 `vbdmcp_marks_<程序名>.json`；`vbd_read_function` / `vbd_find_function`
+结果带 `mark` 字段；另加工具查询全部标记。
+
+**实现**：
+
+| 项 | 内容 |
+|---|---|
+| 新模块 | `src/marks.cpp` / `marks.h` —— vbdmcp **自有数据，不写入工程** |
+| 存储位置 | `<被分析 exe 目录>\vbdmcp_marks_<exe 文件名>.json`；目录不可写时回退 `%TEMP%\vbdmcp_marks\`（返回值 `marks_file` 告知实际路径） |
+| 文件格式 | UTF-8 JSON；`marks` 键为 `"module_index,function_index"`，值 `{mark, name, address, updated}`（name/address 供人工核对） |
+| 缓存与写盘 | 进程内缓存 + 文件 mtime 感知（外部编辑/多窗口自动重载）；写入是"临时文件 + MoveFileEx 替换"的原子写 |
+| 新工具 | `vbd_read_marks`（分页列出）、`vbd_write_mark_function`（`mark` 传空串 = 清除） |
+| 结果增强 | `vbd_read_function` / `vbd_find_function` 命中项带出 `mark`（自有 UTF-8 数据，不经编码桥） |
+| 工具数 | 29 → **31**（15 只读 + 16 写入） |
+
+**与 rename 的关键区别**：`vbd_write_rename_function` 在 native 项目上会触发宿主
+模态框（已加保护直接拒绝）；标记完全不触碰工程数据，因此 **native 项目同样可用**
+（用户当前的 `VR_ONln.exe` 即是 native）。

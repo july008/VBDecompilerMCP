@@ -10,7 +10,7 @@ A **C++17** [VB Decompiler](https://www.vb-decompiler.org) plugin that runs as a
 ## Features
 
 - **MCP Streamable HTTP transport**: clients send requests with `POST`; the server pushes messages and keep-alives over an **SSE stream**. The protocol version is negotiated at `initialize` (supports `2025-06-18` / `2025-03-26` / `2024-11-05`; defaults to `2025-03-26`).
-- **29 tools in two strict groups**: `vbd_read_*` (14, always visible) and `vbd_write_*` (15, only after you enable "Allow MCP clients to write project data").
+- **31 tools in two strict groups**: `vbd_read_*` (15, always visible) and `vbd_write_*` (16, only after you enable "Allow MCP clients to write project data").
 - **Localhost by default**: binds `127.0.0.1` only — never `0.0.0.0`. LAN exposure requires an explicit opt-in plus a high-risk warning dialog.
 - **Session admission control**: the first real tool call (`tools/call`) pops a confirmation dialog showing the client address; capability queries (`listTools`) never prompt.
 - **Read-only by default**: `listTools` is filtered dynamically, write tools require an explicit UI switch, and `callTool` re-checks permissions (defense in depth).
@@ -151,10 +151,10 @@ curl http://127.0.0.1:3023/health
 ```
 
 ```json
-{"status":"ready","server":{"name":"VB Decompiler MCP Server","version":"2.0.0","protocolVersion":"2025-03-26"},"instances":[{"name":"VB Decompiler.exe","arch":"Win32","bits":32,"path":"C:\\...","pid":1234,"local":true,"state":"ready","readOnly":true,"tools_count":13}],"ready":1}
+{"status":"ready","server":{"name":"VB Decompiler MCP Server","version":"2.0.0","protocolVersion":"2025-03-26"},"instances":[{"name":"VB Decompiler.exe","arch":"Win32","bits":32,"path":"C:\\...","pid":1234,"local":true,"state":"ready","readOnly":true,"tools_count":15}],"ready":1}
 ```
 
-`readOnly:true` with `tools_count:14` means read-only mode (after enabling writes: `false` and `29`).
+`readOnly:true` with `tools_count:15` means read-only mode (after enabling writes: `false` and `31`).
 
 ### Self-test (no VB Decompiler host required)
 
