@@ -1,0 +1,20 @@
+# 编译产物（构建输出目录与中间文件）
+Win32/
+*.obj
+*.pdb
+*.exp
+*.lib
+*.tlog
+*.ilk
+*.idb
+
+# VS 本地状态与资源编辑器缓存（res/vbmcp.rc 的图形编辑状态，会随时重建）
+.vs/
+*.aps
+
+# 工具链的输出目录（脚本与测试工程源码本身必须入库）
+tools/**/Debug/
+tools/**/Release/
+
+# i18n 提取脚本的中间产物（语言包本身要提交）
+lang_res/untranslated*.txt
