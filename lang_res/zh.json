@@ -36,7 +36,6 @@
     "Maximum number of items to return": "最多返回多少条",
     "Start offset": "起始偏移",
     "Get metadata of the project currently open in VB Decompiler: source file path, whether it is natively compiled, compiler type (VB/.NET/Delphi/Unknown), whether it is packed, and the VB Decompiler installation path. No parameters.": "获取当前VB Decompiler打开的项目元信息：源文件路径、是否Native编译、编译器类型(VB/.NET/Delphi/Unknown)、是否打包、VB Decompiler安装路径。无参数。",
-    "Get the complete decompiled text of the entire project. Returns a large string (possibly very long, containing all Forms/Modules/Functions).": "获取整个反编译项目的完整文本内容。返回大字符串（可能非常长，含所有Form/Module/Function）。",
     "Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI.": "用新文本完全替换项目文本。会自动 UpdateAll 提交修改并刷新GUI。",
     "Full replacement project text (required)": "替换后的完整项目文本（必填）",
     "Clear VB Decompiler's internal decompilation buffers. Use only when implementing a custom full decompilation workflow; discards all existing decompilation results.": "清空VB Decompiler的内部反编译缓冲。仅在实现自定义完整反编译工作流时使用，会丢弃所有现有反编译结果。",
@@ -96,5 +95,9 @@
     "Server busy: %d MCP tasks are already queued on the VB Decompiler UI thread (limit %d). The request was rejected to keep the UI responsive; retry in a moment.": "服务器繁忙：VB Decompiler 界面线程上已排队的 MCP 任务达到 %d 个（上限 %d），为保证界面响应已拒绝本次请求，请稍后重试。",
     "Task timed out: the request waited longer than %d seconds for the VB Decompiler UI thread. The operation was cancelled; try again with a smaller scope (for example a single module or function).": "任务超时：请求等待 VB Decompiler 界面线程超过 %d 秒，操作已取消。请缩小范围后重试（例如只读取单个模块或函数）。",
     "\"0\"=off, \"1\"=on": "\"0\"=关, \"1\"=开",
-    "Encoding of text fields: \"utf-8\" (default) converts between the project's ANSI/GBK bytes and UTF-8; \"gbk\" returns/sends raw ANSI bytes (legacy behavior).": "文本字段编码：\"utf-8\"（默认）在工程的 ANSI/GBK 字节与 UTF-8 之间转换；\"gbk\" 直接返回/发送原始 ANSI 字节（旧行为）。"
+    "Encoding of text fields: \"utf-8\" (default) converts between the project's ANSI/GBK bytes and UTF-8; \"gbk\" returns/sends raw ANSI bytes (legacy behavior).": "文本字段编码：\"utf-8\"（默认）在工程的 ANSI/GBK 字节与 UTF-8 之间转换；\"gbk\" 直接返回/发送原始 ANSI 字节（旧行为）。",
+    "form_index %d is out of range (the project has %lld forms)": "form_index %d 超出范围（当前项目共有 %lld 个窗体）",
+    "module_index %d is out of range (the project has %lld modules)": "module_index %d 超出范围（当前项目共有 %lld 个模块）",
+    "function_index %d is out of range (module %d has %lld functions)": "function_index %d 超出范围（模块 %d 共有 %lld 个函数）",
+    "Get the text of the project file (.vbp manifest: project type, references, components, startup object). This is the project descriptor, NOT the concatenated decompiled source of every form/module - to read code, list the forms/modules (vb_read_list_forms / vb_read_list_modules) and read them one by one.": "获取工程文件（.vbp 清单：工程类型、引用、组件、启动对象）的文本。这是工程描述文件，而不是所有窗体/模块的反编译源码合集——要读代码请先列出窗体/模块（vb_read_list_forms / vb_read_list_modules）再逐个读取。"
 }

@@ -192,6 +192,33 @@ static int arg_index(yyjson_val *args, const char *name, int def)
     return (int)v;      /* 校验后再截断 */
 }
 
+/* ---------------- 索引越界预检 ----------------
+ * 引擎对超界索引不报错，而是返回哨兵值（实测 form_index=999999 时
+ * form_name / form_text 都是 "Error"），直接透传会被 AI 当成真实数据；
+ * 越界的写操作更不应该执行。因此所有带索引的工具在进入业务逻辑前
+ * 先做一次上限校验，越界直接返回参数错误。 */
+
+/* 窗体总数（引擎直接提供，调用很便宜） */
+static long long form_total(void)
+{
+    char *s = vb_get_value(VB_GetVBFormCount, 0, 0);
+    const long long n = safe_parse_int(s, 0);
+    if (s) vbmcp_free(s);
+    return n;
+}
+
+/* 指定模块的函数数 */
+static long long module_function_total(int midx)
+{
+    char *s = vb_get_value(VB_GetModuleFunctionCount, midx, 0);
+    const long long n = safe_parse_int(s, 0);
+    if (s) vbmcp_free(s);
+    return n;
+}
+
+/* 模块总数：复用模块名探测缓存（定义见下方 get_module_names） */
+static long long module_total(void);
+
 /* 分页元数据 + 把 items 数组挂到 root。
  * 遵守 MCP Best Practices 分页约定：
  *   {count, total_count, offset, limit, has_more[, next_offset], <items_key>: [...]} */
@@ -314,6 +341,10 @@ static char *tool_read_form(yyjson_val *args, int *out_err)
     if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "form_index", -1);
     if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if ((long long)idx >= form_total()) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("form_index %d is out of range (the project has %lld forms)", idx, form_total()));
+    }
 
     char *content = vb_get_value(VB_GetVBForm, (int)idx, 0);
     if (!content) return err_json(out_err, VBMCP_ERR_BUSINESS, _("Cannot read form content"));
@@ -389,6 +420,12 @@ static const std::vector<std::string> *get_module_names(void)
     return &g_module_cache.names;
 }
 
+/* 模块总数（复用上面的探测缓存；见文件上方的前置声明） */
+static long long module_total(void)
+{
+    return (long long)get_module_names()->size();
+}
+
 static char *tool_read_list_modules(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
@@ -419,6 +456,10 @@ static char *tool_read_module(yyjson_val *args, int *out_err)
     if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
     if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if ((long long)idx >= module_total()) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
+    }
 
     char *content = vb_get_value(VB_GetModule, (int)idx, 0);
     char *name    = vb_get_value(VB_GetModuleName, (int)idx, 0);
@@ -449,6 +490,10 @@ static char *tool_read_list_module_functions(yyjson_val *args, int *out_err)
     if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
     if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if ((long long)idx >= module_total()) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
+    }
 
     long long limit, offset;
     read_paging(args, &limit, &offset);
@@ -489,6 +534,12 @@ static char *tool_read_function(yyjson_val *args, int *out_err)
     int midx = arg_index(args, "module_index", -1);
     int fidx = arg_index(args, "function_index", -1);
     if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if ((long long)midx >= module_total() ||
+        (long long)fidx >= module_function_total(midx)) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
+               module_function_total(midx)));
+    }
 
     char *name      = vb_get_value(VB_GetModuleFunctionName, (int)midx, (int)fidx);
     char *addr      = vb_get_value(VB_GetModuleFunctionAddress, (int)midx, (int)fidx);
@@ -651,6 +702,10 @@ static char *tool_write_form(yyjson_val *args, int *out_err)
     const char *text = arg_str(args, "form_text");
     if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
     if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing form_text"));
+    if ((long long)idx >= form_total()) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("form_index %d is out of range (the project has %lld forms)", idx, form_total()));
+    }
 
     set_text_value(VB_SetVBForm, text, enc, (int)idx, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
@@ -673,6 +728,10 @@ static char *tool_write_rename_form(yyjson_val *args, int *out_err)
     const char *new_name = arg_str(args, "new_name");
     if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
     if (!new_name) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if ((long long)idx >= form_total()) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("form_index %d is out of range (the project has %lld forms)", idx, form_total()));
+    }
     if (is_native_project()) return err_json(out_err, VBMCP_ERR_BUSINESS, _("rename_form is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
 
     set_text_value(VB_SetVBFormName, new_name, enc, (int)idx, 0);
@@ -697,6 +756,10 @@ static char *tool_write_module(yyjson_val *args, int *out_err)
     const char *decl = arg_str(args, "declarations");
     if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
     if (!decl) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing declarations"));
+    if ((long long)idx >= module_total()) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
+    }
 
     set_text_value(VB_SetModule, decl, enc, (int)idx, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
@@ -719,6 +782,10 @@ static char *tool_write_module_string_references(yyjson_val *args, int *out_err)
     const char *refs = arg_str(args, "string_references");
     if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
     if (!refs) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing string_references"));
+    if ((long long)idx >= module_total()) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
+    }
 
     set_text_value(VB_SetModuleStringReferences, refs, enc, (int)idx, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
@@ -741,6 +808,12 @@ static char *tool_write_function(yyjson_val *args, int *out_err)
     const char *code = arg_str(args, "code");
     if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
     if (!code) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
+    if ((long long)midx >= module_total() ||
+        (long long)fidx >= module_function_total(midx)) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
+               module_function_total(midx)));
+    }
 
     set_text_value(VB_SetModuleFunction, code, enc, (int)midx, (int)fidx);
     vb_set_value(VB_UpdateAll, "", 0, 0);
@@ -765,6 +838,12 @@ static char *tool_write_rename_function(yyjson_val *args, int *out_err)
     const char *new_name = arg_str(args, "new_name");
     if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
     if (!new_name) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if ((long long)midx >= module_total() ||
+        (long long)fidx >= module_function_total(midx)) {
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+            _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
+               module_function_total(midx)));
+    }
     if (is_native_project()) return err_json(out_err, VBMCP_ERR_BUSINESS, _("rename_function is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
 
     set_text_value(VB_SetModuleFunctionName, new_name, enc, (int)midx, (int)fidx);
@@ -931,7 +1010,7 @@ typedef struct {
 static const tool_entry_t g_tools[] = {
     /* ---- 只读 ---- */
     { "vb_read_project_info",        _("Get metadata of the project currently open in VB Decompiler: source file path, whether it is natively compiled, compiler type (VB/.NET/Delphi/Unknown), whether it is packed, and the VB Decompiler installation path. No parameters."),           0,                                 0, 0, 1, tool_read_project_info },
-    { "vb_read_project_text",        _("Get the complete decompiled text of the entire project. Returns a large string (possibly very long, containing all Forms/Modules/Functions)."),           0,                                 0, 0, 1, tool_read_project_text },
+    { "vb_read_project_text",        _("Get the text of the project file (.vbp manifest: project type, references, components, startup object). This is the project descriptor, NOT the concatenated decompiled source of every form/module - to read code, list the forms/modules (vb_read_list_forms / vb_read_list_modules) and read them one by one."),           0,                                 0, 0, 1, tool_read_project_text },
     { "vb_read_list_forms",          _("List all VB Forms in the project. Supports pagination (limit/offset). Returns {count, forms:[...]}."),             P_PAGING,                          0, 0, 1, tool_read_list_forms },
     { "vb_read_form",                _("Get the decompiled property text of the specified Form. Returns {form_index, form_name, form_text}."),               P_FORM_INDEX,                      0, 0, 1, tool_read_form },
     { "vb_read_list_modules",        _("List all Modules in the project (standard .bas, class .cls, control .ctl). Supports pagination. Returns {count, modules:[...]}."),           P_PAGING,                          0, 0, 1, tool_read_list_modules },

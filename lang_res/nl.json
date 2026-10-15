@@ -23,7 +23,6 @@
     "Missing text": null,
     "Missing or invalid line": null,
     "Get metadata of the project currently open in VB Decompiler: source file path, whether it is natively compiled, compiler type (VB/.NET/Delphi/Unknown), whether it is packed, and the VB Decompiler installation path. No parameters.": null,
-    "Get the complete decompiled text of the entire project. Returns a large string (possibly very long, containing all Forms/Modules/Functions).": null,
     "List all VB Forms in the project. Supports pagination (limit/offset). Returns {count, forms:[...]}.": null,
     "Get the decompiled property text of the specified Form. Returns {form_index, form_name, form_text}.": null,
     "List all Modules in the project (standard .bas, class .cls, control .ctl). Supports pagination. Returns {count, modules:[...]}.": null,
@@ -96,5 +95,9 @@
     "Server busy: %d MCP tasks are already queued on the VB Decompiler UI thread (limit %d). The request was rejected to keep the UI responsive; retry in a moment.": null,
     "Task timed out: the request waited longer than %d seconds for the VB Decompiler UI thread. The operation was cancelled; try again with a smaller scope (for example a single module or function).": null,
     "\"0\"=off, \"1\"=on": null,
-    "Encoding of text fields: \"utf-8\" (default) converts between the project's ANSI/GBK bytes and UTF-8; \"gbk\" returns/sends raw ANSI bytes (legacy behavior).": null
+    "Encoding of text fields: \"utf-8\" (default) converts between the project's ANSI/GBK bytes and UTF-8; \"gbk\" returns/sends raw ANSI bytes (legacy behavior).": null,
+    "form_index %d is out of range (the project has %lld forms)": null,
+    "module_index %d is out of range (the project has %lld modules)": null,
+    "function_index %d is out of range (module %d has %lld functions)": null,
+    "Get the text of the project file (.vbp manifest: project type, references, components, startup object). This is the project descriptor, NOT the concatenated decompiled source of every form/module - to read code, list the forms/modules (vb_read_list_forms / vb_read_list_modules) and read them one by one.": null
 }
