@@ -347,3 +347,9 @@
 - 权限切换 → 客户端收到 `list_changed` 并刷新清单；
 - 窗体缩放 / Esc / 「恢复默认」的交互；
 - 各 MCP 客户端对 `encoding` 参数与长描述的兼容性。
+
+### 8.4 后续修复：端口微调钮（用户反馈，2026-10-15）
+
+| 问题 | 根因 | 修法 | 验证 |
+|---|---|---|---|
+| 点击端口右侧 + / - 无反应 | ① rc 未写 `UDS_AUTOBUDDY`、代码也未发 `UDM_SETBUDDY`，buddy 未绑定，`UDS_SETBUDDYINT` 无写回目标；② 补绑 buddy 与 32 位范围后，该自动写回在本环境把文本写成首字符（`3023`→`3`）；③ 16 位 `UDM_SETRANGE` 装不下 65535 | **弃用 up-down 自带的 buddy/数值机制**：`dlg_proc` 新增 `UDN_DELTAPOS` 分支，按通知的 `iDelta` 直接改端口编辑框文本（±1，clamp 1..65535）并刷新接入页；编辑框文本是端口值的唯一事实来源 | `tools/ui_preview` 新增 `probe_port_spin`：合成鼠标点击箭头区域（与用户点击同一条控件代码路径），探针输出 `click '+' -> 3024 PASS +1` / `click '-' -> 3023 PASS back to initial` |

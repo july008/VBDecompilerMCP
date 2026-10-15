@@ -236,6 +236,7 @@ MCP 报文（JSON）必须是 UTF-8，而 VB Decompiler 引擎的文本字段是
 | `CreateWindowExA("#32770", 模板ID, ...)` 必崩（AV） | 32 位 USER32 这条路径不可用（模板查找成功也一样崩） | 建页一律用 `CreateDialogParamA(hInst, MAKEINTRESOURCEA(id), 父, proc, 0)` |
 | `TCM_GETCLIENTRECT` 返回 0 | Win32 版 `SysTabControl32` 不实现该消息 | `tab_display_rect()` 用固定内缩兜底：顶部让开 `S(26)` 标签条，四周 `S(6)` |
 | 页窗口跑到屏幕左上角（坐标为负） | 把 tab **客户区**坐标当屏幕坐标调了一次 `ScreenToClient` | 必须两次换算：tab 客户区 → `ClientToScreen` → `ScreenToClient(shell)` |
+| 端口微调钮（spin）点击 +/- 无反应；绑 buddy 后文本又变成首字符（`3023`→`3`） | ① rc 未写 `UDS_AUTOBUDDY`、代码也未发 `UDM_SETBUDDY`，buddy 未绑定时点击不更新任何控件；② 绑上 buddy 后 `UDS_SETBUDDYINT` 的自动写回在本环境把宽字符串按 ANSI 写入编辑框（只剩首字符）；③ 16 位 `UDM_SETRANGE` 装不下 65535（按有符号 short 解释成 -1） | **不依赖 up-down 自带的 buddy/数值机制**：`dlg_proc` 处理 `UDN_DELTAPOS`，按通知的 `iDelta` 直接读/写端口编辑框（文本是唯一事实来源）。注意符号实测为 **up = -1 / down = +1**，要取负。回归：`ui_preview` 的 `probe_port_spin`（合成鼠标点击箭头区域，与真实点击同路径） |
 
 ### 用 VS 资源编辑器改界面
 

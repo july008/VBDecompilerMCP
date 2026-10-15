@@ -827,10 +827,12 @@ static void init_dialog(void)
     set_text(IDC_TXT_BIND, lan_on ? bind : VBMCP_DEFAULT_BIND);
     enable_ctl(IDC_TXT_BIND, lan_on ? TRUE : FALSE);
 
+    /* 端口编辑框是端口值的唯一事实来源；旁边的 up-down（msctls_updown32）
+     * 不绑 buddy、不用它自带的数值机制：点击 +/- 由 dlg_proc 的 UDN_DELTAPOS
+     * 分支直接改本编辑框（原因见该分支的注释）。 */
     char port_txt[16];
     _snprintf_s(port_txt, sizeof(port_txt), _TRUNCATE, "%d", port);
     set_text(IDC_EDIT_PORT, port_txt);
-    send_ctl(IDC_SPIN_PORT, UDM_SETRANGE, 0, MAKELPARAM(65535, 1));
 
     populate_ai_combo();
 
@@ -1229,9 +1231,32 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_NOTIFY: {
-        if (g_tab_hwnd && lp && ((LPNMHDR)lp)->idFrom == IDC_TAB &&
-            ((LPNMHDR)lp)->code == TCN_SELCHANGE) {
-            apply_tab((int)SendMessageA(g_tab_hwnd, TCM_GETCURSEL, 0, 0));
+        if (lp) {
+            LPNMHDR nh = (LPNMHDR)lp;
+            if (nh->idFrom == IDC_TAB && nh->code == TCN_SELCHANGE) {
+                apply_tab((int)SendMessageA(g_tab_hwnd, TCM_GETCURSEL, 0, 0));
+                return TRUE;
+            }
+            /* 端口微调钮：点击 + / - 时把"端口编辑框"的值 ±1 —— 编辑框文本是
+             * 端口值的唯一事实来源。不依赖 up-down 自带的 buddy 机制：
+             * UDS_SETBUDDYINT 在本环境写回时会把文本写成首字符（实测），
+             * 且它的 16 位范围接口装不下 65535。 */
+            if (nh->idFrom == IDC_SPIN_PORT && nh->code == UDN_DELTAPOS) {
+                LPNMUPDOWN ud = (LPNMUPDOWN)lp;
+                char buf[16] = {0};
+                get_item_text(IDC_EDIT_PORT, buf, sizeof(buf));
+                int v = atoi(buf);
+                if (v < 1) v = VBMCP_DEFAULT_PORT;   /* 文本为空/非法：从默认端口起算 */
+                /* 符号实测（ui_preview 的合成点击探针）：up 箭头 iDelta = -1、
+                 * down 箭头 = +1（位置按"向下增长"约定），故取负后 + 为 +1。 */
+                v -= ud->iDelta;
+                if (v < 1)     v = 1;
+                if (v > 65535) v = 65535;
+                _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%d", v);
+                set_text(IDC_EDIT_PORT, buf);
+                update_access_page();                /* 端口变了：刷新接入页地址/片段 */
+                return TRUE;                         /* 阻止控件的默认处理 */
+            }
         }
         return TRUE;
     }
