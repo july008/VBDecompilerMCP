@@ -109,7 +109,10 @@ void vbmcp_http_set_protocol_version(const char *ver);
 /* ============================================================
  * 连接、请求与任务队列限制
  * ============================================================ */
-#define VBMCP_MAX_CONNECTIONS  64
+/* 并发连接上限。必须明显小于 FD_SETSIZE(64)：select 用的 fd_set 还要放下
+ * listener，且 Windows 的 FD_SET 在满时**静默忽略**新句柄（那些连接会
+ * 不被 select 监视、静默挂起）。60 + listener = 61，留出余量。 */
+#define VBMCP_MAX_CONNECTIONS  60
 /* 单个 HTTP 请求头部长度上限（防御超长/畸形头部） */
 #define VBMCP_MAX_HEADER_SIZE  (16 * 1024)
 #define VBMCP_MAX_BODY_SIZE    (64 * 1024 * 1024)

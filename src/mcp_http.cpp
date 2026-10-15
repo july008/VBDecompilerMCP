@@ -954,6 +954,12 @@ vbmcp::SocketHandle create_listen_socket(const std::string& bind_addr, int port)
             continue;
         }
         if (listen(s, SOMAXCONN) == SOCKET_ERROR) { closesocket(s); continue; }
+        /* 监听 socket 必须是非阻塞：select 报可读后要连续 accept 直到
+         * WSAEWOULDBLOCK。若是阻塞模式，第二次 accept（此时已无等待连接）
+         * 会永久挂起整个网络线程 —— 表现为"客户端能建立 TCP 连接，
+         * 但服务器永远不回数据、也不检测断开"。 */
+        u_long nb = 1;
+        ioctlsocket(s, FIONBIO, &nb);
         listener.reset(s);
         break;
     }
@@ -1018,6 +1024,11 @@ void network_thread_main()
                 if (cs == INVALID_SOCKET) break;
                 int one = 1;
                 setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+                /* 连接 socket 也显式设为非阻塞（不依赖是否继承监听 socket）：
+                 * recv/send 的 WSAEWOULDBLOCK 分支据此工作，慢客户端也不会
+                 * 把网络线程阻塞在大响应的 send 上。 */
+                u_long nb = 1;
+                ioctlsocket(cs, FIONBIO, &nb);
                 auto conn = std::make_unique<Connection>();
                 conn->sock.reset(cs);
                 conn->peer = peer_name(cs);
