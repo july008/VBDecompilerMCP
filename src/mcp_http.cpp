@@ -534,7 +534,10 @@ bool accept_has(const std::string& accept, const char* token)
 
 bool is_mcp_path(const std::string& p)
 {
-    return p == "/" || p == "/mcp" || p.empty();
+    /* MCP 端点路径。接受 "/"、"/mcp" 以及带一个多余尾部 "/" 的 "/mcp/"：
+     * 客户端的端点写法/拼接方式不一（有的配置到根路径，有的带尾斜杠），
+     * "/mcp/" 曾会被 404 —— 这种"看起来一样"的路径最容易踩坑。 */
+    return p.empty() || p == "/" || p == "/mcp" || p == "/mcp/";
 }
 
 /* ============================================================
