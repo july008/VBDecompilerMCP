@@ -463,7 +463,7 @@ std::string header_value(const std::string& headers, const char* name)
     return std::string();
 }
 
-/* 返回：1=完整请求，0=数据不足，-1=报文非法，-2=超长 */
+/* 返回：1=完整请求，0=数据不足，-1=报文非法，-2=超长，-3=不支持的传输编码 */
 int parse_request(const std::string& buf, HttpRequest& out)
 {
     const std::size_t hdr_end = buf.find("\r\n\r\n");
@@ -494,6 +494,11 @@ int parse_request(const std::string& buf, HttpRequest& out)
     out.session_id       = header_value(headers, "Mcp-Session-Id");
     out.protocol_version = header_value(headers, "MCP-Protocol-Version");
 
+    /* 不支持 Transfer-Encoding: chunked（MCP 客户端均使用 Content-Length）。
+     * 明确返回 -3，避免被当成"空 body"而得到误导性的 parse error。 */
+    const std::string te = header_value(headers, "Transfer-Encoding");
+    if (te.find("chunked") != std::string::npos) return -3;
+
     std::size_t content_length = 0;
     const std::string cl = header_value(headers, "Content-Length");
     if (!cl.empty()) {
@@ -513,7 +518,12 @@ int parse_request(const std::string& buf, HttpRequest& out)
 bool protocol_version_supported(const std::string& v)
 {
     if (v.empty()) return true;    /* 宽松：未携带则不校验 */
-    return v == VBMCP_PROTOCOL || v == VBMCP_PROTOCOL_LEGACY;
+    /* 客户端在 initialize 响应之后会把协商到的版本放进该头；
+     * 因此这里必须接受整个支持集合（否则新 SDK 客户端会被 400 拒掉，
+     * 表现为"无法连接"）。 */
+    return v == VBMCP_PROTOCOL_2025_06_18 ||
+           v == VBMCP_PROTOCOL_2025_03_26 ||
+           v == VBMCP_PROTOCOL_LEGACY;
 }
 
 bool accept_has(const std::string& accept, const char* token)
@@ -656,9 +666,15 @@ std::string build_health_document()
  * ============================================================ */
 void handle_mcp_post(Connection* c, const HttpRequest& req)
 {
-    if (!accept_has(req.accept, "application/json")) {
+    /* Accept 校验（宽松）：规范要求客户端同时声明 application/json 与
+     * text/event-stream；实际客户端可能只声明其中之一（个别只发
+     * text/event-stream，期望 SSE 响应），因此命中其一（或未携带）即放行 ——
+     * 本服务器的响应体始终是 application/json。 */
+    if (!req.accept.empty() &&
+        !accept_has(req.accept, "application/json") &&
+        !accept_has(req.accept, "text/event-stream")) {
         http_send_error(c, 406, VBMCP_ERR_INVALID_REQUEST,
-                        "Accept must include application/json", req.origin);
+                        "Accept must include application/json or text/event-stream", req.origin);
         return;
     }
     if (!req.content_type.empty() &&
@@ -732,8 +748,14 @@ void handle_mcp_post(Connection* c, const HttpRequest& req)
 
 void handle_request(Connection* c, const HttpRequest& req)
 {
-    vbmcp_logf(VBMCP_LOG_DEBUG, "http %s %s (client=%s, body=%zu)",
-               req.method.c_str(), req.path.c_str(), c->peer.c_str(), req.body.size());
+    /* DEBUG 级：把协商相关的头一并记下。排查"客户端连不上"时先开
+     * VBMCP_DEBUG_LOG=1，看这一行是否到达、以及 accept/协议版本/会话是否符合预期。 */
+    vbmcp_logf(VBMCP_LOG_DEBUG,
+               "http %s %s (client=%s, body=%zu, accept='%s', ctype='%s', proto='%s', session=%s)",
+               req.method.c_str(), req.path.c_str(), c->peer.c_str(), req.body.size(),
+               req.accept.c_str(), req.content_type.c_str(),
+               req.protocol_version.empty() ? "-" : req.protocol_version.c_str(),
+               req.session_id.empty() ? "-" : "yes");
 
     if (req.method == "OPTIONS") {
         /* CORS 预检：未配置可信 origin 时不返回任何 CORS 头（禁止 `*`） */
@@ -819,6 +841,11 @@ bool connection_on_readable(Connection* c)
         if (st == 0) return true;
         if (st == -2) {
             http_send_error(c, 413, VBMCP_ERR_INVALID_REQUEST, "payload too large");
+            return true;
+        }
+        if (st == -3) {
+            http_send_error(c, 400, VBMCP_ERR_PARSE,
+                            "unsupported Transfer-Encoding: chunked; send Content-Length instead");
             return true;
         }
         if (st < 0) {

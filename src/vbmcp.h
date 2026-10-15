@@ -47,11 +47,19 @@
 #define VBMCP_PLUGIN_NAME    "VB Decompiler MCP Server"
 #define VBMCP_AUTHOR         "vbmcp project, admin@vb-decompiler.org"
 #define VBMCP_VERSION        "2.0.0"
-/* 默认协议版本：本实现优先支持 2025-03-26（Streamable HTTP 规范）。
- * 同时也支持 2024-11-05 以兼容 CodeBuddy 等仍基于 2024-11 SDK 的客户端。
- * initialize 处理函数会按客户端请求版本协商。 */
-#define VBMCP_PROTOCOL       "2025-03-26"
-#define VBMCP_PROTOCOL_LEGACY "2024-11-05"
+/* 协议版本：initialize 时按客户端请求的 params.protocolVersion 协商，
+ * 支持集合 = { 2025-06-18, 2025-03-26, 2024-11-05 }（见 mcp_http.cpp
+ * 的 protocol_version_supported 与 mcp_rpc.cpp 的版本协商）。
+ *   - 2025-06-18 与 2025-03-26 对本实现的差异仅为可选特性（结构化输出 /
+ *     elicitation 等），可以直接接受；
+ *   - 2024-11-05 用于兼容仍基于 2024-11 SDK 的旧客户端；
+ *   - 客户端请求不在集合内（或未指定）时回 VBMCP_PROTOCOL。
+ * 客户端会在 initialize 响应后把选中的版本放进后续请求的
+ * MCP-Protocol-Version 头，因此头校验必须接受整个集合。 */
+#define VBMCP_PROTOCOL            "2025-03-26"
+#define VBMCP_PROTOCOL_2025_06_18 "2025-06-18"
+#define VBMCP_PROTOCOL_2025_03_26 "2025-03-26"
+#define VBMCP_PROTOCOL_LEGACY     "2024-11-05"
 #define VBMCP_SESSION_ID     "vbmcp-session"
 
 /* 跨文件函数 */

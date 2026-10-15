@@ -9,7 +9,7 @@ A **C++17** [VB Decompiler](https://www.vb-decompiler.org) plugin that runs as a
 
 ## Features
 
-- **MCP Streamable HTTP transport**: clients send requests with `POST`; the server pushes messages and keep-alives over an **SSE stream**. Protocol version `2025-03-26` (compatible with `2024-11-05`).
+- **MCP Streamable HTTP transport**: clients send requests with `POST`; the server pushes messages and keep-alives over an **SSE stream**. The protocol version is negotiated at `initialize` (supports `2025-06-18` / `2025-03-26` / `2024-11-05`; defaults to `2025-03-26`).
 - **28 tools in two strict groups**: `vb_read_*` (13, always visible) and `vb_write_*` (15, only after you enable "Allow MCP clients to write project data").
 - **Localhost by default**: binds `127.0.0.1` only — never `0.0.0.0`. LAN exposure requires an explicit opt-in plus a high-risk warning dialog.
 - **Session admission control**: the first real tool call (`tools/call`) pops a confirmation dialog showing the client address; capability queries (`listTools`) never prompt.

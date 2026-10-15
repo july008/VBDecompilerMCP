@@ -159,10 +159,29 @@ void vbmcp_set_active_protocol_version(const char *ver)
 /* ============================================================
  * initialize 结果
  * ============================================================ */
-static void add_initialize_result(yyjson_mut_doc *doc, yyjson_mut_val *root)
+/* 协议版本协商：客户端请求的版本在支持集合内 → 回同一版本（客户端会把它放进
+ * 后续请求的 MCP-Protocol-Version 头）；否则回默认版本。支持集合必须与
+ * mcp_http.cpp: protocol_version_supported() 保持一致。 */
+static const char *negotiate_protocol_version(yyjson_val *req)
+{
+    yyjson_val *params = yyjson_obj_get(req, "params");
+    yyjson_val *pv = (params && yyjson_is_obj(params))
+                         ? yyjson_obj_get(params, "protocolVersion") : NULL;
+    const char *want = (pv && yyjson_is_str(pv)) ? yyjson_get_str(pv) : NULL;
+    if (want && (vb_streq(want, VBMCP_PROTOCOL_2025_06_18) ||
+                 vb_streq(want, VBMCP_PROTOCOL_2025_03_26) ||
+                 vb_streq(want, VBMCP_PROTOCOL_LEGACY))) {
+        return want;
+    }
+    return VBMCP_PROTOCOL;
+}
+
+static void add_initialize_result(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                  const char *protocol_version)
 {
     yyjson_mut_val *result = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, result, "protocolVersion", VBMCP_PROTOCOL);
+    yyjson_mut_obj_add_strcpy(doc, result, "protocolVersion",
+                              protocol_version ? protocol_version : VBMCP_PROTOCOL);
 
     /* 只声明实际实现的能力。listChanged=1：写入权限变化时服务端会广播
      * notifications/tools/list_changed（客户端仅在声明 true 时监听该通知）；
@@ -319,8 +338,11 @@ static char *process_jsonrpc_impl(const char *body, const char *client_info,
 
     if (vb_streq(method, "initialize")) {
         if (out_is_initialize) *out_is_initialize = 1;   /* 网络线程据此分配会话 id */
-        vbmcp_set_active_protocol_version(VBMCP_PROTOCOL);
-        add_initialize_result(doc, root);
+        /* 版本协商：客户端请求版本在支持集合内则回它（SDK 会据此设置
+         * 后续请求头）；否则回默认版本。/health 展示协商结果。 */
+        const char *chosen = negotiate_protocol_version(req);
+        vbmcp_set_active_protocol_version(chosen);
+        add_initialize_result(doc, root, chosen);
     }
     else if (vb_streq(method, "ping")) {
         yyjson_mut_obj_add_val(doc, root, "result", yyjson_mut_obj(doc));

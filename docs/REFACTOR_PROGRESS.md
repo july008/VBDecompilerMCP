@@ -49,7 +49,7 @@
 - `initialize` 响应附带 `Mcp-Session-Id`（GUID）；后续请求带该头且不匹配 → `404` + 标准错误。
 - `GET` 的 `Accept` 必须含 `text/event-stream`，否则 `406`。
 - `POST` 的 `Accept` 必须含 `application/json`（否则 `406`），`Content-Type` 非 JSON → `415`。
-- `MCP-Protocol-Version` 头非法 → `400`（兼容 `2025-03-26` 与 `2024-11-05`）。
+- `MCP-Protocol-Version` 头非法 → `400`（支持集合 `2025-06-18` / `2025-03-26` / `2024-11-05`，见第八节 8.5）。
 - JSON-RPC 批量（数组）请求明确回绝 `400`（本实现单请求单响应）。
 - notification（无 `id`）→ `202 Accepted` 空 body。
 
@@ -353,3 +353,13 @@
 | 问题 | 根因 | 修法 | 验证 |
 |---|---|---|---|
 | 点击端口右侧 + / - 无反应 | ① rc 未写 `UDS_AUTOBUDDY`、代码也未发 `UDM_SETBUDDY`，buddy 未绑定，`UDS_SETBUDDYINT` 无写回目标；② 补绑 buddy 与 32 位范围后，该自动写回在本环境把文本写成首字符（`3023`→`3`）；③ 16 位 `UDM_SETRANGE` 装不下 65535 | **弃用 up-down 自带的 buddy/数值机制**：`dlg_proc` 新增 `UDN_DELTAPOS` 分支，按通知的 `iDelta` 直接改端口编辑框文本（±1，clamp 1..65535）并刷新接入页；编辑框文本是端口值的唯一事实来源 | `tools/ui_preview` 新增 `probe_port_spin`：合成鼠标点击箭头区域（与用户点击同一条控件代码路径），探针输出 `click '+' -> 3024 PASS +1` / `click '-' -> 3023 PASS back to initial` |
+
+### 8.5 连接兼容性修复（用户反馈：CodeBuddy 连不上，2026-10-15）
+
+| 项 | 问题 | 修法 |
+|---|---|---|
+| 协议版本头 | `protocol_version_supported()` 只接受 `2025-03-26` / `2024-11-05`；新 SDK 客户端在后续请求头带 `2025-06-18` 会被 `400` 拒掉（表现为"无法连接"） | 支持集合扩为 { `2025-06-18`, `2025-03-26`, `2024-11-05` } |
+| initialize 协商 | 此前固定回 `2025-03-26` | 新增 `negotiate_protocol_version()`：按客户端 `params.protocolVersion` 回同一版本（客户端会据此设置后续请求头），`/health` 展示协商结果 |
+| Accept 校验 | POST 要求 `Accept` 必须含 `application/json`，只声明 `text/event-stream` 的客户端会被 `406` | 放宽：命中 `application/json` 或 `text/event-stream` 其一（或未携带）即放行（响应体始终是 JSON） |
+| chunked 传输 | `Transfer-Encoding: chunked` 被当成空 body，报误导性的 parse error | 明确回 `400` + `send Content-Length instead`；MCP 客户端均使用 Content-Length，不做 chunked 解码 |
+| 诊断日志 | "连不上"时看不到请求头细节 | DEBUG 级请求日志增加 `accept` / `content-type` / 协议版本 / 会话摘要；排查时开 `VBMCP_DEBUG_LOG=1` 看每行请求与 WARN 级 `transport error` |

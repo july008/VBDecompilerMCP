@@ -404,6 +404,29 @@ _F("%d files, %zu bytes", 7, (size_t)1024);
 - 任何解析都要防御超长/畸形输入（参考 `parse_request()` 的长度与数字校验）；
 - CORS 仅在 `Origin` 命中 `CorsOrigins` 白名单时输出，禁止 `*`。
 
+**客户端兼容性（实测约定，改动前先读）**：
+
+- **协议版本**：支持集合 = { `2025-06-18`, `2025-03-26`, `2024-11-05` }
+  （`vbmcp.h` 的 `VBMCP_PROTOCOL_*`）。两处必须一致——
+  `mcp_http.cpp: protocol_version_supported()`（请求头校验）与
+  `mcp_rpc.cpp: negotiate_protocol_version()`（initialize 协商）。
+  客户端会把协商到的版本放进后续请求的 `MCP-Protocol-Version` 头，
+  因此头校验漏掉某个版本会直接表现为"客户端无法连接"；
+- **Accept**：POST 命中 `application/json` 或 `text/event-stream` 之一即放行
+  （响应体始终是 JSON）；不要恢复成"必须含 application/json"，
+  否则只声明 SSE 的客户端会被 406 拒绝；
+- **传输编码**：**不支持** `Transfer-Encoding: chunked`（明确回 400）。
+  MCP 客户端均使用 `Content-Length`；如需支持 chunked，要在
+  `parse_request()` 里实现分块解码并补自测；
+- **排查"连不上"**：`VBMCP_DEBUG_LOG=1` 后：
+  1. 日志里**有没有** `client connected` / `http POST /mcp ...` 行——
+     没有 → 客户端根本没连上（服务未启用 / 端口不符 / 被别的进程占用，
+     先 `curl http://127.0.0.1:3023/health` 确认）；
+  2. 有请求行但立刻跟着 `transport error http=4xx`——看该行的
+     accept / proto 字段与错误 message（本节的兼容性约定就是为此而设）；
+  3. 请求行正常但没有 `tools/call` 后续——通常是 initialize 响应未被接受
+     （对照 `initialize` 响应里的 `protocolVersion` 与 capabilities）。
+
 ---
 
 ## 7. 错误码约定（`vbmcp.h`）
