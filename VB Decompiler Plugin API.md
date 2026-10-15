@@ -2,6 +2,7 @@
 
 This documentation describes the interface for creating plugins for VB Decompiler. The plugin system allows you to analyze, modify, or extend the decompiled code and internal structures of the application via a shared library (DLL).
 
+
 ## Architecture Overview
 
 The plugin system operates on a callback model:
@@ -136,7 +137,7 @@ Operations on Standard Modules (.bas) or Class Modules (.cls).  vlNumber : Modul
 | 32   | GetModule                 | Get the decompiled declarations header of the module. |
 | 33   | SetModule                 | Set the decompiled declarations header of the module. |
 | 34   | GetModuleStringReferences | Get list of string references used in this module.    |
-| 335  | SetModuleStringReferences | Set string references.                                |
+| 35   | SetModuleStringReferences | Set string references.                                |
 | 36   | GetModuleCount            | Returns total number of modules.                      |
 
 #### Procedures / Functions

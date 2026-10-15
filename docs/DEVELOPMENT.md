@@ -29,7 +29,7 @@
    `python tools/extract_i18n.py` 同步语言包；如涉及结构变化再更新
    `docs/REFACTOR_PROGRESS.md`。
 
-### 当前工具清单（28 = 13 只读 + 15 写入）
+### 当前工具清单（28 = 13 只读 + 15 写入；完整说明与参数见 README.md 的工具表格）
 
 只读：`vb_read_project_info`、`vb_read_project_text`、`vb_read_list_forms`、`vb_read_form`、
 `vb_read_list_modules`、`vb_read_module`、`vb_read_list_module_functions`、`vb_read_function`、
@@ -54,9 +54,8 @@
 | `options_dialog.cpp` | 设置窗体（`SysTabControl32` 双属性页：服务设置 / 接入信息；写入权限、局域网警告、AI 客户端向导） | 允许（UI 主线程） |
 | `i18n.h / i18n.cpp` | gettext 风格翻译：`_()` / `_A()` / `_F()` / `_AF()`，加载 zh.json 资源、khash 查表、GBK 轮转缓冲 | 只读取文本（UI 主线程） |
 | `khash.h` | 字符串哈希表（i18n 翻译表专用，API 兼容 khash 子集） | — |
-| `util.cpp` | 内存助手、分级日志（临界区串行化） | 无 |
+| `util.cpp` | 内存助手、分级日志（临界区串行化）、编码转换（UTF-8 ↔ ANSI/GBK） | 无 |
 | `config.cpp` | 注册表读写 | 无（启动/设置窗体时调用） |
-| `strbuf.cpp` | 动态字符串缓冲（仅非 JSON 文本拼装） | 无 |
 
 ### 多语言（i18n）注意事项
 
@@ -122,9 +121,12 @@
   （曾有 `load_from_file("lang_res\\zh.json")` 回退，会让开发机上的磁盘副本掩盖
   "RCDATA 没链进 DLL" 的打包问题——踩过：rc 漏了 `JSON_ZH` 一行，界面却仍是中文。）
   验证嵌入：`tools/verify_i18n_resource.ps1`（需 32 位宿主）。
-- `tools/i18n_selftest`（**需先构建** `tools\i18n_selftest\i18n_selftest.vcxproj`）
-  链同一份 `res\vbmcp.rc`，所以测的就是实际发布的语言包；它覆盖语言名映射、
-  未翻译回退、`_A()` 的 GBK 转换、`_F()` 占位符校验、`I18n_Clear()`。
+- `tools/selftest`（**需先构建** `tools\selftest\selftest.vcxproj`）直接链接
+  `src/util.cpp` / `src/i18n.cpp` / `src/mcp_tools.cpp` / `src/vbdec_sdk.cpp`，
+  在真实产品代码上覆盖：编码桥往返、语言名映射、未翻译回退、`_F()` 占位符校验
+  （`I18n_FormatArity` / `I18n_FormatCompatible`）、工具 schema（工具数 /
+  encoding 参数 / 描述无残留转义）。注意它**不链** `res/vbmcp.rc`，
+  "中文语言包确实嵌进 DLL"仍由 `tools/verify_i18n_resource.ps1` 验证。
 - 内存：`I18n_Clear()` 释放哈希表内 strdup 的 key/value 与 yyjson 文档；
   `DllMain(DLL_PROCESS_DETACH)` 调用 `I18n_PrepareShutdown()`
   （先关闭查表再释放，避免其它线程正在查表）。
@@ -132,13 +134,38 @@
 （旧实现说明：早期版本用 `lang.h` 的 `T_*` 枚举 + `g_strings[T_COUNT]` 双语数组，
 已于 i18n 改造中移除，`T_*` 键与 `vbmcp_t()/vbmcp_t_utf8()` 一并删除。）
 
-- `vbmcp_t(key)` 返回 **GBK**（ANSI）字节，仅用于 `MessageBoxA` / `SetDlgItemTextA` 等 ANSI 控件；
-- `vbmcp_t_utf8(key)` 返回 **UTF-8**，用于 MCP JSON 报文；
-- 语言包是 `lang_res/zh.json`（`{"msgid": "msgstr"}`），新增语言 = 新增一个
-  JSON 文件 + 在 `res/vbmcp.rc` 里加一条 `LANG_XX RCDATA` + 在 `i18n.cpp` 里
-  增加对应的 `I18nMode` 分支；
 - 所有 JSON 文案一律用 `yyjson_mut_obj_add_strcpy(doc, obj, key, _(msgid))` 写入，
   不做手工转义；MCP 报文必须是 **UTF-8**，因此 JSON 里只用 `_()`，不用 `_A()`。
+- 线程安全：语言包表用**原子指针发布**（`g_trans` / `g_mode` 为 `std::atomic`），
+  旧表"只退休不释放"，因此 MCP **网络线程**（`mcp_http.cpp` 里的 `_F()` 错误消息）
+  与 UI 线程可以并发查表；真正释放只发生在 `I18n_Clear()`（DLL 卸载前）。
+
+---
+
+### 数据编码（MCP JSON ↔ 引擎 ANSI/GBK）
+
+MCP 报文（JSON）必须是 UTF-8，而 VB Decompiler 引擎的文本字段是 ANSI
+（中文 Windows = GBK）字节。两侧转换由 `mcp_tools.cpp` 统一处理：
+
+| 方向 | 辅助函数 | 说明 |
+|---|---|---|
+| 读（引擎 → JSON） | `add_text()` / `arr_add_text()` | 默认 `vbmcp_acp_to_utf8()` 转 UTF-8；`encoding:"gbk"` 时原样输出 |
+| 写（JSON → 引擎） | `set_text_value()` | 默认 `vbmcp_str_to_gbk()` 转 ANSI；`encoding:"gbk"` 时原样透传 |
+| 声明 | `add_encoding_field()` | 含自由文本的结果附加 `{"encoding":"utf-8"}` / `{"encoding":"gbk"}` |
+
+规则：
+
+1. **每个工具都接受可选参数 `encoding`**（`"utf-8"` 默认 / `"gbk"` 旧行为），
+   由 `arg_encoding()` 统一读取，schema 里由 `add_params()` 无条件加入该参数；
+2. 含**自由文本**的结果（项目文本 / 表单 / 模块声明 / 函数代码 / 窗口文本）
+   必须用 `add_text*` 并调用 `add_encoding_field()`；短标量（索引、地址、
+   `"0"/"1"` 标志）也走 `add_text*`（ASCII 快速路径零开销），但不加 encoding 字段；
+3. 写工具的响应回显**客户端原文**（UTF-8），不回显转换后的引擎字节；
+4. `initialize` 的 `instructions` 向客户端声明该契约；
+5. 转换失败（非法字节序列）回退原字节，绝不崩溃——见
+   `vbmcp_acp_to_utf8()` / `vbmcp_str_to_gbk()` 的实现注释；
+6. 回归保障：`tools/selftest` 覆盖往返转换与 schema 字段（含每个工具都有
+   `encoding` 参数），改这块代码后必须跑绿。
 
 ---
 
@@ -166,9 +193,12 @@
   5. 自建刷在 `vbmcp_options_dialog_cleanup()` 里 `DeleteObject`（系统刷不能删）。
   诊断日志会打印 `theme=` 与 `uiBg=0xRRGGBB`，改配色相关代码时先核对这两个值。
 - **控件树在资源里，几何在代码里**：控件由 `res/vbmcp.rc` 的对话框模板创建
-  （ID / 样式 / Tab 顺序 / `WS_THICKFRAME`），`layout_dialog(HWND)` 只算坐标；
-  `WM_SIZE` 会再次调用，因此窗体可自由缩放
-  （`WS_THICKFRAME` + `WM_GETMINMAXINFO` 限最小客户区）。
+  （ID / 样式 / Tab 顺序），`layout_dialog(HWND)` 只算坐标；`WM_SIZE` 会再次调用，
+  因此窗体可自由缩放（`WM_GETMINMAXINFO` 限最小客户区）。
+  **`WS_THICKFRAME` 由运行期补，不在 rc 里**：资源编辑器保存 .rc 时会把它丢掉
+  （"Resizing" 属性未勾选），`dlg_proc` 的 `WM_INITDIALOG` 检测到样式缺失时用
+  `SetWindowLongPtr(GWL_STYLE, |WS_THICKFRAME)` + `SWP_FRAMECHANGED` 补上，
+  对编辑器重写免疫；判断"能否拖拽缩放"不要只看 rc 文本。
 - **一个属性页一个模板**：rc 的对话框模板是扁平的，同一个模板里的控件都是兄弟，
   表达不了"这个控件属于第 2 个属性页"，所以资源编辑器里无法分组。现在是：
   | 模板 | ID | 内容 |
@@ -264,28 +294,37 @@ accept/select/HTTP/SSE            消息循环
 1. **实现函数**（`mcp_tools.cpp`）：
 
    ```cpp
-   static char *tool_read_something(yyjson_val *args)
+   /* 每个工具实现：args 为已解析的 arguments；错误分类写入 out_err。 */
+   static char *tool_read_something(yyjson_val *args, int *out_err)
    {
+       const int enc = arg_encoding(args);                     // 编码契约（见"数据编码"小节）
        long long idx = arg_int(args, "thing_index", -1);
-       if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, vbmcp_t_utf8(T_ERR_BAD_THING_INDEX));
+       if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid thing_index"));
 
-       char *text = vb_get_value(VB_GetSomething, (int)idx, 0);   // 只读
-       if (!text) return err_json(VBMCP_ERR_BUSINESS, vbmcp_t_utf8(T_ERR_NO_PROJECT));
+       char *text = vb_get_value(VB_GetSomething, (int)idx, 0);   // 只读：引擎返回 ANSI/GBK 字节
+       if (!text) return err_json(out_err, VBMCP_ERR_BUSINESS, _("No project is currently open"));
 
        yyjson_mut_val *root = nullptr;
        yyjson_mut_doc *doc = new_obj_doc(&root);
-       if (!doc) { vbmcp_free(text); return err_json(VBMCP_ERR_INTERNAL, vbmcp_t_utf8(T_ERR_OOM)); }
-       yyjson_mut_obj_add_strcpy(doc, root, "text", text);
+       if (!doc) { vbmcp_free(text); return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory")); }
+       add_text(doc, root, "text", text, enc);                 // 入 JSON 前按 encoding 转 UTF-8
+       add_encoding_field(doc, root, enc);                     // 含自由文本的结果声明编码
        vbmcp_free(text);
        return doc_to_string(doc);
    }
    ```
 
    约定：
-   - 返回值必须是 **new alloc 的 JSON 字符串**（调用方 `vbmcp_free`），用 `doc_to_string()` 产出；
-   - 参数用 `arg_int()` / `arg_str()` 读取，缺失返回默认值；
-   - 错误用 `err_json(code, utf8_text)`：`VBMCP_ERR_INVALID_PARAMS` / `VBMCP_ERR_BUSINESS`
-     / `VBMCP_ERR_INTERNAL` / `VBMCP_ERR_PERMISSION`。
+   - 签名是 `char *impl(yyjson_val *args, int *out_err)`；返回值必须是
+     **new alloc 的 JSON 字符串**（调用方 `vbmcp_free`），用 `doc_to_string()` 产出；
+   - 错误用 `err_json(out_err, code, utf8_text)`：`VBMCP_ERR_INVALID_PARAMS` /
+     `VBMCP_ERR_BUSINESS` / `VBMCP_ERR_INTERNAL` / `VBMCP_ERR_PERMISSION`；
+     错误分类经 `out_err` 显式回传（不再有全局变量）；
+   - 参数用 `arg_int()` / `arg_str()` 读取，缺失返回默认值；所有索引经
+     `arg_index()` 校验上界（防越界调用引擎）；
+   - 文本字段：读侧用 `add_text()` / `arr_add_text()`（引擎 ANSI → 结果编码），
+     写侧用 `set_text_value()`（客户端编码 → 引擎 ANSI）；**不要**直接把引擎文本
+     塞进 JSON（详见"数据编码"小节）。
 
 2. **注册工具表**（`mcp_tools.cpp: g_tools[]`）：
 
@@ -322,7 +361,7 @@ _AF("An MCP client is trying to access this VB Decompiler project data.\n\nClien
 _F("%d files, %zu bytes", 7, (size_t)1024);
 ```
 
-两道安全网（都由 `tools/i18n_selftest` 覆盖）：
+两道安全网（都由 `tools/selftest` 覆盖）：
 
 1. **实参个数核对（运行期）**：`_F()/_AF()` 是变参模板，格式化前先解析格式串，
    算出"需要几个实参"（`%*.*f` 这种带 `*` 的算 3 个），与实际传入个数比对：
@@ -348,7 +387,8 @@ _F("%d files, %zu bytes", 7, (size_t)1024);
 | `python tools/extract_i18n.py --migrate-empty` | 一次性把旧脚本留下的 `""` 占位迁成 `null`（会改已有条目，默认不执行） |
 | `python tools/extract_i18n.py --lang zh --lang fr` | 只处理指定语言（可重复）；代码必须与 `src/i18n.cpp` 的 `kLangs` 一致 |
 | `tools\\extract_i18n.bat` | 双击运行 `extract_i18n.py` 的包装（带 `pause`） |
-| `msbuild tools\\i18n_selftest\\i18n_selftest.vcxproj /p:Configuration=Debug /p:Platform=Win32` | 构建 i18n 自测程序（**需在仓库根目录运行**，它读取 `lang_res/zh.json`） |
+| `msbuild tools\selftest\selftest.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `tools\selftest\Win32\Debug\selftest\selftest.exe` | 构建并运行**无宿主**纯函数自测（编码桥 / i18n / 工具 schema）；**需在仓库根目录运行**，退出码 0 = 全绿 |
+| `tools\check_all.bat` | 一键提交前检查：`gen_ids_header --check` + `extract_i18n --check` + 自测构建/运行 + Release 构建 |
 | `msbuild tools\ui_preview\ui_preview.vcxproj /p:Configuration=Debug /p:Platform=Win32` → `ui_preview.exe [en]` | **不需要 VB Decompiler** 即可渲染真实设置窗体，并截图到 `%TEMP%\vbmcp_ui_page*.bmp`（含"放大窗体后重排"的效果），同时把页窗口/页内控件坐标与消息转发结果写进 `%TEMP%\vbmcp_ui_probe.txt`，改 UI 后用它做回归对比 |
 | `python tools/gen_ids_header.py` / `--check` | 由 `res/vbmcp.rc` 的 `#define` 生成 `src/vbmcp_ids.h` / 校验两者一致（头文件是生成产物，不要手改） |
 | `powershell -File tools\\verify_i18n_resource.ps1` | 用 32 位宿主验证 `JSON_ZH` 已嵌入 DLL（必须 32 位宿主：64 位 PowerShell 加载 32 位 DLL 会报 193） |
@@ -399,6 +439,8 @@ _F("%d files, %zu bytes", 7, (size_t)1024);
 | `VBMCP_TASK_TIMEOUT_MS` | 30000 | 单任务超时（`VBMCP_TASK_TIMEOUT_MS` 可覆盖） |
 | `VBMCP_MAX_PROJECT_TEXT` | 16MB | `vb_write_project_text` 单次写入上限 |
 | `VBMCP_MAX_CONNECTIONS` | 64 | 并发连接上限 |
+| `kMaxSendBufferBytes`（`mcp_http.cpp`） | 4MB | SSE 单连接待发缓冲上限（超限断开该连接） |
+| `kLogMaxBytes`（`util.cpp`） | 10MB | 日志文件上限（超限轮转 `.old`，只保留一代） |
 
 ---
 
@@ -422,3 +464,6 @@ msbuild vbmcp.sln /p:Configuration=Release /p:Platform=Win32 /t:Rebuild /nologo 
 - [ ] 新增/修改展示字符串已用 `_()`（ANSI 控件用 `_A()`）包裹，且已运行
       `python tools/extract_i18n.py`（`--check` 无 missing）
 - [ ] 工具名 / JSON 键名 / 注册表键值未被 `_()` 包裹
+- [ ] `tools\check_all.bat` 全绿（ID 一致 + 词条一致 + 自测 + Release 构建）
+- [ ] 新增文本字段已按"数据编码"小节处理（读 `add_text*` / 写 `set_text_value`；
+      含自由文本的结果调用 `add_encoding_field`）

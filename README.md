@@ -16,6 +16,7 @@ C++17 实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [
 - **默认只读**：`listTools` 动态过滤，写权限需用户在 UI 显式开启；`callTool` 入口二次校验权限。
 - **后台网络线程 + UI 任务队列**：网络 IO 在独立后台线程，工具调用一律投递到 UI 主线程执行，带超时、取消令牌与并发上限，绝不阻塞/带崩界面。
 - **全量 yyjson**：无手写 JSON 序列化代码；协议层错误一律使用 MCP 标准错误对象。
+- **UTF-8 文本契约**：工具默认在工程 ANSI/GBK 字节与 UTF-8 之间双向转换（读侧转出、写侧转回），可用 `encoding:"gbk"` 回退旧字节透传行为。
 - **中英双语界面**：菜单、设置窗体、AI 客户端接入向导、帮助文本，以及 MCP `tools/list` 描述与工具错误消息，均跟随 VB Decompiler 主程序语言。
 
 ## 安全模型（务必阅读）
@@ -66,6 +67,8 @@ C++17 实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [
 | `vb_write_update_all` | 提交所有修改并刷新 GUI |
 
 分页：`vb_read_list_forms` / `vb_read_list_modules` / `vb_read_list_module_functions` / `vb_read_list_frx_icons` 接受 `limit`（默认 100，最大 10000）与 `offset`（默认 0），返回 `{count, total_count, offset, limit, has_more, next_offset, ...}`。
+
+数据编码：全部工具接受可选参数 `encoding`（`"utf-8"` 默认 / `"gbk"` 旧行为）。默认模式下服务端把工程的 ANSI/GBK 字节转成 UTF-8 输出、把客户端 UTF-8 参数转回 ANSI/GBK 写入，保证 MCP 报文始终是合法 UTF-8；含代码/声明/项目文本的结果附带 `{"encoding": "utf-8"}` 字段，便于客户端判断。仅在客户端仍按 ANSI 字节处理数据时才需要传 `encoding:"gbk"`。
 
 ## 快速开始
 
@@ -146,9 +149,10 @@ set VBMCP_LOG_LEVEL=3     :: 0=ERROR 1=WARN 2=INFO(默认) 3=DEBUG
 set VBMCP_TASK_TIMEOUT_MS=30000   :: 单个 MCP 任务超时（毫秒，1000~600000）
 ```
 
-日志只记录连接、工具名、权限判定、错误分类与耗时，**不记录任何项目源码/反编译文本**。
+日志只记录连接、工具名、权限判定、错误分类与耗时，**不记录任何项目源码/反编译文本**；
+单文件超过 10MB 时自动轮转为 `%TEMP%\vbmcp.log.old`（只保留一代）。
 
-### 测试
+### 健康检查
 
 ```cmd
 curl http://127.0.0.1:3023/health
@@ -159,6 +163,17 @@ curl http://127.0.0.1:3023/health
 ```
 
 `readOnly:true` + `tools_count:13` 表示处于只读模式（勾选写入权限后为 `false` + `28`）。
+
+### 自测（无需 VB Decompiler 宿主）
+
+提交前一键跑全部检查（资源 ID 一致 + i18n 词条一致 + 纯函数自测 + Release 构建）：
+
+```cmd
+tools\check_all.bat
+```
+
+也可单独运行 `tools\selftest`（编码桥 / i18n / 工具 schema，26 项断言），
+详见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 第 5 节。
 
 ### MCP 客户端配置
 
@@ -232,7 +247,7 @@ curl http://127.0.0.1:3023/health
 
 - **yyjson**（`third_party/yyjson`，MIT）：唯一的 JSON 依赖，所有 MCP 协议报文均由其构建/解析。
 - **Winsock**（`ws2_32.lib`）：传输层。
-- 其余（HTTP 解析、动态字符串 `strbuf`）为自实现，HTTP 解析器只处理 MCP 所需的最小子集。
+- 其余（HTTP 解析、字符串与编码工具）为自实现，HTTP 解析器只处理 MCP 所需的最小子集。
 
 ## 限制
 
@@ -240,6 +255,7 @@ curl http://127.0.0.1:3023/health
 - 启用状态不持久化：每次 VB Decompiler 重启后默认不启用。
 - 不实现 v3.9 以前的全部命令（部分命令在现代版本的 VB Decompiler 中可能行为不同）。
 - UI 侧任务串行执行：已进入引擎调用的任务无法被取消（引擎同步阻塞），取消令牌作用于排队阶段与结果回写前。
+- 更完整的已知限制、取消边界与后续建议见 [docs/REFACTOR_PROGRESS.md](docs/REFACTOR_PROGRESS.md) 第六节。
 
 ## 文件结构
 
@@ -249,16 +265,17 @@ vbmcp/
 ├── build.bat                     构建 + 部署脚本
 ├── README.md / README_EN.md      中英文文档
 ├── SECURITY.md                   安全模型与风险说明
+├── VB Decompiler Plugin API.md   上游 SDK 参考（Plugin API 说明 + vbmcp 差异注记）
 ├── docs/
 │   ├── DEVELOPMENT.md            开发文档（工具命名规范 / 架构 / 新增工具）
-│   └── REFACTOR_PROGRESS.md      改造进度记录
+│   ├── REFACTOR_PROGRESS.md      改造进度记录
+│   └── OPTIMIZATION_PLAN.md      优化方案（P0–P4）与实施记录
 ├── src/
 │   ├── vbmcp.h                   公共头（配置 / 常量 / 全局状态 / SDK 封装）
 │   ├── vbmcp_mem.hpp             C++ RAII 助手（SocketHandle / unique_ptr / ScopeGuard）
 │   ├── vbmcp_ids.h              控件/资源 ID（由 res/vbmcp.rc 生成，勿手改）
 │   ├── vbmcp.def                 导出函数定义
-│   ├── strbuf.h / strbuf.cpp     动态字符串缓冲（非 JSON 文本拼装）
-│   ├── util.cpp                  内存 / 分级日志 / 字符串工具
+│   ├── util.cpp                  内存 / 分级日志 / 字符串与编码工具（UTF-8 ↔ GBK）
 │   ├── config.cpp                注册表配置读写（Port/BindAddress/AllowWrite/CorsOrigins）
 │   ├── i18n.h / i18n.cpp         gettext 风格翻译（_/_A/_F/_AF）+ zh.json 资源加载
 │   ├── khash.h                   字符串哈希表（i18n 翻译表专用）
@@ -270,7 +287,12 @@ vbmcp/
 │   └── plugin_main.cpp           插件入口（导出函数 + DllMain）
 ├── res/vbmcp.rc                资源脚本：语言包 + **设置窗体 DIALOGEX 模板** + 版本信息
 ├── lang_res/zh.json             中文语言包（RCDATA 嵌入 DLL，随源码提交）
-├── tools/extract_i18n.py        词条提取 / 语言包同步 / 待翻译清单
+├── tools/
+│   ├── extract_i18n.py          词条提取 / 语言包同步 / 待翻译清单
+│   ├── gen_ids_header.py        由 res/vbmcp.rc 生成/校验 src/vbmcp_ids.h
+│   ├── check_all.bat            一键校验：ID + i18n + 自测 + 构建
+│   ├── selftest/                无宿主单元自测（编码桥 / i18n / 工具 schema）
+│   └── ui_preview/              渲染设置窗体并截图（UI 回归）
 ├── third_party/yyjson/           JSON 库（以 C 编译）
 └── res/                          Windows 资源（版本信息）
 ```

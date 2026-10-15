@@ -67,6 +67,8 @@ All tools use the `vb_` prefix (avoids collisions with other MCP servers); the s
 
 Pagination: `vb_read_list_forms` / `vb_read_list_modules` / `vb_read_list_module_functions` / `vb_read_list_frx_icons` accept `limit` (default 100, max 10000) and `offset` (default 0) and return `{count, total_count, offset, limit, has_more, next_offset, ...}`.
 
+Text encoding: every tool accepts an optional `encoding` parameter (`"utf-8"` default, `"gbk"` legacy behavior). By default the server converts the project's ANSI/GBK bytes to UTF-8 in results and converts UTF-8 arguments back to ANSI/GBK before writing, so all MCP payloads are valid UTF-8. Results that contain free-form text carry an `{"encoding": "utf-8"}` field. Use `encoding:"gbk"` only for clients that still process raw ANSI bytes.
+
 ## Quick start
 
 ### Build
@@ -140,7 +142,7 @@ set VBMCP_LOG_LEVEL=3     :: 0=ERROR 1=WARN 2=INFO(default) 3=DEBUG
 set VBMCP_TASK_TIMEOUT_MS=30000   :: per-task timeout in ms (1000..600000)
 ```
 
-Logs contain connection info, tool names, permission decisions, error classes and durations only — **never project source or decompiled text**.
+Logs contain connection info, tool names, permission decisions, error classes and durations only — **never project source or decompiled text**. The log file rotates to `%TEMP%\vbmcp.log.old` once it exceeds 10MB (one generation kept).
 
 ### Smoke test
 
@@ -153,6 +155,16 @@ curl http://127.0.0.1:3023/health
 ```
 
 `readOnly:true` with `tools_count:13` means read-only mode (after enabling writes: `false` and `28`).
+
+### Self-test (no VB Decompiler host required)
+
+One command runs every pre-commit check (resource IDs + i18n entries + host-free unit tests + Release build):
+
+```cmd
+tools\check_all.bat
+```
+
+Or run `tools\selftest` alone (encoding bridge / i18n / tool schema, 26 assertions) — see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) section 5.
 
 ### Client configuration
 
@@ -225,7 +237,7 @@ Design details and the "add a tool" workflow: [docs/DEVELOPMENT.md](docs/DEVELOP
 
 - **yyjson** (`third_party/yyjson`, MIT): the only JSON dependency; all MCP protocol payloads are built/parsed with it.
 - **Winsock** (`ws2_32.lib`): transport.
-- HTTP parsing and `strbuf` are self-contained; the HTTP parser implements only the subset MCP needs.
+- HTTP parsing is self-contained; the HTTP parser implements only the subset MCP needs.
 
 ## Limitations
 
@@ -233,6 +245,7 @@ Design details and the "add a tool" workflow: [docs/DEVELOPMENT.md](docs/DEVELOP
 - The enabled state is not persisted: after each VB Decompiler restart the server stays off until you enable it again.
 - Commands older than v3.9 are not implemented (some may behave differently in modern VB Decompiler builds).
 - UI tasks run serially; a task already inside an engine call cannot be interrupted (the engine call is synchronous) — cancellation applies to the queued phase and to the result write-back.
+- More known limitations and follow-up ideas: [docs/REFACTOR_PROGRESS.md](docs/REFACTOR_PROGRESS.md) section 6.
 
 ## File layout
 
@@ -242,15 +255,16 @@ vbmcp/
 ├── build.bat                     build + deploy script
 ├── README.md / README_EN.md      documentation (zh / en)
 ├── SECURITY.md                   security model and risks
+├── VB Decompiler Plugin API.md   upstream SDK reference (+ vbmcp notes)
 ├── docs/
 │   ├── DEVELOPMENT.md            development guide (naming, architecture, adding tools)
-│   └── REFACTOR_PROGRESS.md      refactor progress log
+│   ├── REFACTOR_PROGRESS.md      refactor progress log
+│   └── OPTIMIZATION_PLAN.md      optimization plan (P0-P4) and implementation record
 ├── src/
 │   ├── vbmcp.h                   shared header (config / constants / globals / SDK)
 │   ├── vbmcp_mem.hpp             C++ RAII helpers (SocketHandle / unique_ptr / ScopeGuard)
 │   ├── vbmcp.def                 exported functions
-│   ├── strbuf.h / strbuf.cpp     dynamic string buffer (non-JSON text)
-│   ├── util.cpp                  memory / leveled logging / string helpers
+│   ├── util.cpp                  memory / leveled logging / string + encoding helpers
 │   ├── config.cpp                registry config (Port/BindAddress/AllowWrite/CorsOrigins)
 │   ├── i18n.h / i18n.cpp         gettext-style translation (_ / _A / _F / _AF) + zh.json loading
 │   ├── khash.h                   string hash map used by the translation table
@@ -263,7 +277,12 @@ vbmcp/
 │   └── plugin_main.cpp           plugin entry (exports + DllMain)
 ├── res/vbmcp.rc                resource script: language pack + **settings dialog template**
 ├── lang_res/zh.json             Chinese language pack (embedded as RCDATA, version-controlled)
-├── tools/extract_i18n.py        extract msgids / sync pack / to-translate report
+├── tools/
+│   ├── extract_i18n.py          extract msgids / sync pack / to-translate report
+│   ├── gen_ids_header.py        generate/verify src/vbmcp_ids.h from res/vbmcp.rc
+│   ├── check_all.bat            one-shot checks: IDs + i18n + selftest + build
+│   ├── selftest/                host-free unit tests (encoding / i18n / tool schema)
+│   └── ui_preview/              render the settings dialog and take screenshots
 ├── third_party/yyjson/           JSON library (compiled as C)
 └── res/                          Windows resources (version info)
 ```

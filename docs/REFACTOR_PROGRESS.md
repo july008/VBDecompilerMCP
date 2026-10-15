@@ -3,7 +3,7 @@
 > 本文档记录「对齐最新 MCP 官方规范（Streamable HTTP / SSE）+ 项目改造总要求」的
 > 逐项完成情况。每完成一项即在此勾选并记录实现位置，便于回溯与验收。
 >
-> 最后更新：2026-10-14
+> 最后更新：2026-10-15
 
 ---
 
@@ -22,6 +22,7 @@
 | I | 设置窗体 UI 重构：双属性页（服务设置 / 接入信息） | ✅ 完成 |
 | K | 设置窗体 UI 打磨：字号 12pt+DPI、说明文字透明背景、窗体可缩放与自适应布局 | ✅ 完成 |
 | J | i18n 改造：删除 `T_*` 双语数组，改为 `_()` + `lang_res/zh.json` + DLL 内嵌资源 | ✅ 完成 |
+| M | 优化批次（P0–P4）：工程卫生 / 协议一致性 / 健壮性 / UTF-8 编码桥 / 测试工具 | ✅ 完成（详见第八节） |
 
 编译状态：`msbuild vbmcp.sln /p:Configuration=Release /p:Platform=Win32`
 → **0 error / 0 warning**，产物 `Win32\Release\vbmcp.dll`。
@@ -141,7 +142,7 @@
 
 | 项 | 改造前 | 改造后 |
 |---|---|---|
-| 词条载体 | `lang.h` 的 `T_*` 枚举 + `lang.cpp: g_strings[T_COUNT]` 双语数组（107 条） | `lang_res/zh.json`（104 条 msgid→msgstr），随源码提交 |
+| 词条载体 | `lang.h` 的 `T_*` 枚举 + `lang.cpp: g_strings[T_COUNT]` 双语数组（107 条） | `lang_res/zh.json`（msgid→msgstr，当前 98 条），随源码提交 |
 | 取串API | `vbmcp_t(T_X)`（GBK）/ `vbmcp_t_utf8(T_X)`（UTF-8） | `_()`（UTF-8）/ `_A()`（GBK）/ `_F()` / `_AF()` / `N_()` |
 | 加载方式 | 进程内静态表 | `RCDATA("JSON_ZH")` **嵌入 vbmcp.dll** → `GetModuleHandleExA(FROM_ADDRESS)` 取本模块句柄 → `FindResourceA`/`LoadResource` → yyjson 解析 → khash 查表 |
 | 外部依赖 | 无 | **无外部 langpack.dll**（资源就在本 DLL 内） |
@@ -171,9 +172,9 @@
 | 验证项 | 结果 |
 |---|---|
 | Release 构建 | 0 error / 0 warning |
-| `tools/verify_i18n_resource.ps1`（32 位宿主 LoadLibrary + FindResourceA） | `JSON_ZH` 资源存在，14881 字节，内容为 UTF-8 JSON；FreeLibrary 正常 |
-| `tools/i18n_selftest`（20 项断言） | ALL PASS：EN 回退 / ZH 加载 / 查表 / 未收录回退 / `_F` 参数替换 / `_A` GBK 输出 / `_AF` / `I18n_Clear` |
-| `python tools/extract_i18n.py --check` | 104 词条，新增 0 / 待翻译 0 / 失效 0 |
+| `tools/verify_i18n_resource.ps1`（32 位宿主 LoadLibrary + FindResourceA） | `JSON_ZH` 资源存在（阶段 J 时 14881 字节，随后续词条增删变化），内容为 UTF-8 JSON；FreeLibrary 正常 |
+| `tools/i18n_selftest`（20 项断言，阶段 J 时存在；阶段 M 起由 `tools/selftest` 承接，见第八节） | ALL PASS：EN 回退 / ZH 加载 / 查表 / 未收录回退 / `_F` 参数替换 / `_A` GBK 输出 / `_AF` / `I18n_Clear` |
+| `python tools/extract_i18n.py --check` | 98 词条（阶段 J 时为 104），新增 0 / 待翻译 0 / 失效 0 |
 | `_F()`/`_AF()` 占位符支持与两道安全网 | 支持 `%s %d %zu %.2f %%`；自测覆盖「实参个数核对」与「译文占位符核对」，并因此修掉 2 个真实缺陷（漏参 → 访问冲突；安全退化路径仍走 `vsnprintf`） |
 | `%zu` / `%s` 类词条审计 | 10 条含占位符的词条全部经 `_F`/`_AF`/snprintf 使用，无字面量 `%` 泄漏 |
 
@@ -185,7 +186,7 @@
 |---|---|
 | 字体偏小 | 字号由 `-14px(≈10.5pt)` 提到 **12pt**，且随系统 DPI 缩放（`GetDpiForWindow` + `S()`） |
 | 文字有背景色 | 安全说明/生效提示由白底 `EDIT` 改为 `STATIC`（`WM_CTLCOLORSTATIC` 透明），只有真正的"字段框/内容框"保留白底 |
-| 窗体太小、不能调 | 默认客户区 425×510 → **720×636**；加 `WS_THICKFRAME` + `WS_MAXIMIZEBOX` 可拖拽缩放；`WM_GETMINMAXINFO` 限制最小 640×560 |
+| 窗体太小、不能调 | 默认客户区 425×510 → **720×636**；可拖拽缩放 + `WM_GETMINMAXINFO` 限制最小 640×560（`WS_THICKFRAME` 写进 rc 后会被资源编辑器保存时丢掉，阶段 M 改为运行期补样式，见第八节） |
 
 顺带修掉的布局缺陷（截图暴露）：
 
@@ -251,14 +252,20 @@
    可改为多 worker 并发。
 2. **取消的边界**：已进入引擎调用的任务无法中断（引擎是同步阻塞的），取消令牌只在
    「排队中」和「结果回写前」生效；超时后引擎侧调用仍会跑完，但响应被丢弃。
-3. **会话粒度**：当前会话 id 按连接分配，MCP 规范允许跨连接复用同一会话；若客户端在
-   SSE 长连接上复用会话，需要后续支持「MCP-Session-Id → 连接」的映射表。
+3. **会话粒度**：会话 id 按连接分配，且只在"本连接已持有 id"时校验（新连接携带
+   旧 id 不会 404，也不会关联旧会话）——按宽容策略处理规范允许的恢复场景，
+   README 的表述已同步为此语义。若要严格支持「MCP-Session-Id → 连接组」映射，
+   需后续实现映射表（本批未做，见待办）。
 4. **批量请求**：按规范允许服务端拒绝，本实现显式返回 `400`，不做批量合并。
 5. ~~`src/i18n.c` 未完成的历史实验~~ → **已解决（阶段 J）**：`src/i18n.cpp` +
    `src/khash.h` 正式实现并参与编译，`lang_res/zh.json` 以 `RCDATA("JSON_ZH")`
    嵌入 `vbmcp.dll`，`lang.cpp/lang.h` 的 `T_*` 双语数组已删除。
-6. **`strbuf.cpp`**：仅用于非 JSON 的文本拼装（HTTP 头、GBK 转换），
-   所有 JSON 报文已改由 yyjson 生成，保留该模块是为了不再引入第二套字符串抽象。
+6. ~~`strbuf.cpp`~~ → **已删除（阶段 M）**：HTTP 头拼装改用 `std::string`，
+   编码转换归入 `util.cpp`（`vbmcp_str_to_gbk` / `vbmcp_acp_to_utf8`），
+   仓库中不再存在该模块。
+7. **待办（本批未做）**：会话 id 跨连接映射表；工具描述精简（当前最长约 260 字符，
+   占用 AI 上下文）；协议版本向 2025-06-18 演进评估；`/health` 的 `pid` 字段在
+   局域网场景可考虑一并隐藏。
 
 ---
 
@@ -284,3 +291,59 @@
 - [ ] 单请求超时（`VBMCP_TASK_TIMEOUT_MS=2000` + 大项目读取）→ 返回 `-32002`
 - [ ] 关闭 MCP 客户端（不关服务）→ 日志出现 `task cancelled`，无残留任务
 - [ ] 发送 100MB body → `413`；发送畸形 HTTP 头 → `400`
+- [ ] 中文项目「读 → 修改 → 写 → 回读」全链路一致（默认 `utf-8`；`encoding:"gbk"` 回退旧行为）
+- [ ] 只读/读写切换后，已连接客户端收到 `notifications/tools/list_changed` 并自动重拉清单（能力声明已为 true）
+- [ ] 设置窗体可拖拽缩放；按 Esc 可关闭；「恢复默认设置」只改界面、点「取消」可放弃
+- [ ] 慢客户端不读 SSE 时，待发缓冲超过 4MB 被断开且日志有记录
+
+---
+
+## 八、阶段 M：优化批次（P0–P4）实施记录
+
+方案、问题证据与用户决议见 [OPTIMIZATION_PLAN.md](OPTIMIZATION_PLAN.md)；本节只记录
+**实施结果与验证**（2026-10-15）。
+
+### 8.1 改动清单
+
+| 项 | 内容 | 主要位置 |
+|---|---|---|
+| P0-1 | `.gitignore` 修正：`tools/` 脚本与测试工程入库，产物 / `.vs` / `__pycache__` 忽略；`Win32/Release/vbmcp.dll` 停止跟踪 | `.gitignore` |
+| P0-2 | 阶段 A–L 成果分批提交（2 个提交），工作树归零 | git 历史 |
+| P1-1 | `initialize` 只声明实际实现的 tools 能力，`listChanged=1`（与广播行为对齐）；删除未实现的 prompts/resources 声明 | `mcp_rpc.cpp` |
+| P1-2 | 工具描述去掉残留的手写 JSON 转义（`\"0\"=off` → `"0"=off, "1"=on`） | `mcp_tools.cpp` + `lang_res/zh.json` |
+| P1-3 | 无 `id` 的请求（notification）统一 202 空响应，不再按方法名白名单 | `mcp_rpc.cpp` |
+| P1-4 | i18n 表指针原子化（`g_mode`/`g_trans`），让网络线程查表成为定义良好的并发 | `i18n.cpp` |
+| P1-5 | `WS_THICKFRAME` 改为运行期补样式（资源编辑器保存会丢），窗体恢复可拖拽缩放 | `options_dialog.cpp` |
+| P1-6 | Esc 可关闭窗体；「恢复默认设置」只重置界面、由「确定」统一生效 | `options_dialog.cpp` |
+| P2-1 | SSE 单连接待发缓冲上限 4MB，超限断开该连接 | `mcp_http.cpp` |
+| P2-2 | HTTP 头长度独立校验（16KB 上限真正生效） | `mcp_http.cpp` |
+| P2-3 | 会话 id 由 UI 线程在 initialize 完成后回标（`task->is_initialize`），取消 body 字符串搜索 | `mcp_http.cpp` + `mcp_rpc.cpp` |
+| P2-4 | 服务未运行时不再残留 `list_changed` 广播标志 | `mcp_http.cpp` |
+| P2-5 | CORS 白名单进程内缓存（服务 stop/start 失效） | `mcp_http.cpp` |
+| P2-6 | 模块名列表进程内缓存（写操作 / 项目文件名变化失效） | `mcp_tools.cpp` |
+| P2-7 | 日志合并为单实现 + 单文件 10MB 自动轮转（`.old`） | `util.cpp` |
+| P2-8 | 非回环监听时 `/health` 只返回文件名，不暴露宿主绝对路径 | `mcp_http.cpp` |
+| P4-3a | `vbmcp_server_start` 的 bind 等待由 `Sleep` 忙等改为条件变量（最多 3 秒） | `mcp_http.cpp` |
+| D-1 | **UTF-8 编码桥（用户决议）**：读侧 ANSI→UTF-8、写侧 UTF-8→ANSI；全部工具新增可选参数 `encoding`（默认 `utf-8`，`gbk` 回退字节透传）；含自由文本的结果带 `encoding` 字段；`initialize.instructions` 声明契约 | `util.cpp` + `mcp_tools.cpp/h` + `mcp_rpc.cpp` |
+| D-3 | 工具错误码改为显式 `int *out_err` 回传，删除全局 `g_tool_err` | `mcp_tools.cpp/h` |
+| D-4 | （既有能力）引擎 Set 泄漏分级告警；SECURITY.md 按实际泄漏量级如实描述 | `vbdec_sdk.cpp` / `SECURITY.md` |
+| P4-1 | 全部 md 去噪：strbuf / 旧 API / i18n_selftest / 词条数 / 样式表述 / 文件结构等 | 各文档 |
+| P4-2 | 新增 `tools/selftest`（26 项断言）+ `tools/check_all.bat`；`ui_preview` 随 `tools/` 入库 | `tools/` |
+| P4-3b | `build.bat` 支持 `VBDEC_DIR` 环境变量覆盖宿主路径 | `build.bat` |
+
+### 8.2 验证结果
+
+| 验证项 | 结果 |
+|---|---|
+| Release 构建（`msbuild vbmcp.sln /p:Configuration=Release /p:Platform=Win32`） | 0 error / 0 warning |
+| `tools/selftest`（编码桥往返 / i18n 纯函数 / 工具 schema） | 26 checks, 0 failure |
+| `python tools/extract_i18n.py --check` | 98 词条，新增 0 / 待翻译 0 / 失效 0（zh 全译） |
+| `python tools/gen_ids_header.py --check` | 34 个 ID 同步 |
+| `tools/check_all.bat` | 全绿（以上检查的一键入口） |
+
+### 8.3 待人工回归（需 VB Decompiler 宿主，已并入第七节清单）
+
+- 中文项目读写全链路（默认 utf-8 / `encoding:"gbk"` 回退）；
+- 权限切换 → 客户端收到 `list_changed` 并刷新清单；
+- 窗体缩放 / Esc / 「恢复默认」的交互；
+- 各 MCP 客户端对 `encoding` 参数与长描述的兼容性。

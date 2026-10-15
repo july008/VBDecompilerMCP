@@ -1,8 +1,10 @@
-# vbmcp 优化方案（提案 · 待确认后实施）
+# vbmcp 优化方案（已实施 · 2026-10-15）
 
-> 状态：**提案，尚未改动任何代码**。请按文末「待确认事项」的编号回复要执行/放弃的条目与选项。
-> 评估基准：2026-10-15 工作树（HEAD = `e1dac25`，其上存在大量未提交改动，见 P0-2）。
-> 评估人：CodeBuddy（仅静态审查 + 只读校验脚本，未运行 VB Decompiler 宿主）。
+> 状态：**已实施（2026-10-15）**。用户决议：全部实施（P0–P4），且工具输出统一 UTF-8。
+> 逐项实施结果与验证见文末「决议与实施对照」与「实施记录」；
+> 长期历史记录见 [REFACTOR_PROGRESS.md](REFACTOR_PROGRESS.md) 第八节（阶段 M）。
+> 评估基准：2026-10-15 工作树（当时 HEAD = `e1dac25`，其上存在大量未提交改动，见 P0-2）。
+> 评估方式：静态审查 + 只读校验脚本（未运行 VB Decompiler 宿主；需真机回归的项已标注）。
 
 ---
 
@@ -77,7 +79,7 @@
 - **证据**：
   - `src/mcp_rpc.cpp:169` 声明 `capabilities.tools.listChanged = 0`，但 `src/mcp_http.cpp:1143` 在写入权限变化时会广播 `notifications/tools/list_changed`。按 MCP 规范，客户端**只会在 listChanged=true 时监听该通知**；当前实现会让「权限变化自动通知客户端」形同虚设（REFACTOR_PROGRESS 4.5 声称已实现）。
   - `src/mcp_rpc.cpp:171-177` 声明了 `prompts` 与 `resources` 能力（含 `subscribe/listChanged`），但服务端**没有实现** `prompts/*`、`resources/*` 方法，客户端探测会得到 `-32601`。
-- **建议**：`listChanged` 改 `true`；删除 `prompts`/`resources` 声明（只保留 `tools`，规范允许）；如希望保留 resources 声明，则同时实现 `resources/list` 返回空数组（二选一，见待确认 T-2）。
+- **建议**：`listChanged` 改 `true`；删除 `prompts`/`resources` 声明（只保留 `tools`，规范允许）；如希望保留 resources 声明，则同时实现 `resources/list` 返回空数组（二选一，决议见第 6 节 T-2）。
 - **工作量**：S。
 
 #### P1-2 工具 schema 描述残留「手写 JSON 时代」的转义
@@ -270,16 +272,39 @@
 
 ---
 
-## 6. 待确认事项（请按编号回复）
+## 6. 决议与实施对照
 
-| 编号 | 事项 | 选项 |
-|---|---|---|
-| T-1 | 批次 1（gitignore + 整理提交）是否现在就做？ | 是 / 否 / 仅提交不改 ignore |
-| T-2 | P1-1 能力声明怎么改？ | a) 只声明 tools（推荐）/ b) 保留 resources 并实现空列表 |
-| T-3 | P1-5 缩放修复方式 | a) 运行期补 WS_THICKFRAME（推荐）/ b) 改 rc + 校验脚本 |
-| T-4 | P1-6「恢复默认设置」语义 | a) 只改 UI，确定后生效（推荐）/ b) 保留立即生效 + 确认框 |
-| T-5 | **D-1 编码桥选哪个方案**（A 不做 / B 只读侧 / C 双向+参数 / D C+开关） | 需你拍板；若选 C/D 需安排真机实测 |
-| T-6 | D-2 会话 id | a) 保持实现、修文档（推荐）/ b) 实现映射表 |
-| T-7 | D-3 错误码传递重构 | a) 保持 / b) 显式 out 参数（推荐，与 D-1 合并） |
-| T-8 | 批次 5（selftest / check_all / ui_preview 入库）是否要做？ | 是 / 否 |
-| T-9 | 是否有其他痛点（例如某个工具在真实客户端下表现异常、AI 读中文乱码等）需要纳入？ | 请补充 |
+> 用户回复：**「工具输出结果采用 utf-8 …… 最后实施 P0-P4」**（即全部条目不裁剪）。
+
+| 编号 | 事项 | 决议 | 实施情况 |
+|---|---|---|---|
+| T-1 | 批次 1（gitignore + 整理提交） | 做 | 已完成：`.gitignore` 修正 + 2 个整理提交 |
+| T-2 | 能力声明 | 只声明 tools | 已完成：`listChanged=true`，删除 prompts/resources |
+| T-3 | 缩放修复方式 | 运行期补 `WS_THICKFRAME` | 已完成（`options_dialog.cpp`，对编辑器重写免疫） |
+| T-4 | 「恢复默认设置」语义 | 只改 UI、确定后生效 | 已完成（含「权限模式」标签按勾选预览） |
+| T-5 | **编码桥** | **工具输出统一 UTF-8**（双向转换 + 参数回退） | 已完成：默认 `utf-8`（读转出 / 写转回），`encoding:"gbk"` 回退旧行为 |
+| T-6 | 会话 id | 保持宽松实现、修正文档 | 已完成（README/REFACTOR 表述同步） |
+| T-7 | 错误码传递 | 显式 out 参数 | 已完成（删除全局 `g_tool_err`） |
+| T-8 | 测试基础设施 | 做 | 已完成：`tools/selftest`（26 项）+ `tools/check_all.bat` |
+| T-9 | 其他痛点 | 无补充 | — |
+
+**关于"结果是否要携带编码信息"的落地建议**（已按此实施）：
+
+1. **契约级**：默认 UTF-8 写进 `initialize.instructions`，客户端可读到；
+2. **结果级**：只给 7 个"含自由文本"的读工具结果加一个顶层 `encoding` 字段
+   （project_text / form / module / function / sub_main / active_text / active_disasm_text）；
+   纯数字 / 列表 / 名称类结果不加（避免冗余与 AI 上下文浪费）；
+3. **参数级**：全部 28 个工具的 schema 增加可选 `encoding` 参数（默认 `utf-8`，
+   `gbk` 回退），客户端显式可查、可按需切换。
+
+---
+
+## 7. 实施记录（2026-10-15）
+
+- 逐项改动清单、验证结果与待人工回归项见
+  [REFACTOR_PROGRESS.md 第八节](REFACTOR_PROGRESS.md)（阶段 M）；
+- 验证结论：Release 构建 0 error / 0 warning；`tools/selftest` 26 项断言全过；
+  `python tools/extract_i18n.py --check`、`python tools/gen_ids_header.py --check` 全绿；
+  `tools/check_all.bat` 可一键复现全部检查；
+- 明确留作后续（未做）：会话 id 跨连接映射表、工具描述精简、协议版本向 2025-06-18
+  的演进评估、`/health` 的 `pid` 字段在局域网场景的取舍。
