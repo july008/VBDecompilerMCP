@@ -36,9 +36,7 @@
     "Maximum number of items to return": "最多返回多少条",
     "Start offset": "起始偏移",
     "Get metadata of the project currently open in VB Decompiler: source file path, whether it is natively compiled, compiler type (VB/.NET/Delphi/Unknown), whether it is packed, and the VB Decompiler installation path. No parameters.": "获取当前VB Decompiler打开的项目元信息：源文件路径、是否Native编译、编译器类型(VB/.NET/Delphi/Unknown)、是否打包、VB Decompiler安装路径。无参数。",
-    "Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI.": "用新文本完全替换项目文本。会自动 UpdateAll 提交修改并刷新GUI。",
     "Full replacement project text (required)": "替换后的完整项目文本（必填）",
-    "Clear VB Decompiler's internal decompilation buffers. Use only when implementing a custom full decompilation workflow; discards all existing decompilation results.": "清空VB Decompiler的内部反编译缓冲。仅在实现自定义完整反编译工作流时使用，会丢弃所有现有反编译结果。",
     "List all VB Forms in the project. Supports pagination (limit/offset). Returns {count, forms:[...]}.": "列出项目中的所有 VB Form。支持分页（limit/offset）。返回 {count, forms:[...]}。",
     "Get the decompiled property text of the specified Form. Returns {form_index, form_name, form_text}.": "获取指定 Form 的反编译属性文本。返回 {form_index, form_name, form_text}。",
     "Form index (0-based)": "Form 索引（从 0 开始）",
@@ -49,12 +47,10 @@
     "Replace the module's declarations header.": "替换模块 declarations 头部。",
     "List all functions in the specified module. Supports pagination. Returns {module_index, count, functions:[{name,address,index}...]}.": "列出指定模块的所有函数。支持分页。返回 {module_index, count, functions:[{name,address,index}...]}。",
     "Get a function's decompiled code plus multiple views (fast/disassembly/string references). Returns {module_index, function_index, name, address, code, code_fast, disassembly, string_references}.": "获取函数反编译代码 + 多种视图（fast/反汇编/字符串引用）。返回 {module_index, function_index, name, address, code, code_fast, disassembly, string_references}。",
-    "Replace a function's code.": "替换函数代码。",
     "Rename a function.": "重命名函数。",
     "Get the code of the program entry point Sub Main. No parameters.": "获取程序入口 Sub Main 的代码。无参数。",
     "Set the Sub Main code.": "设置 Sub Main 代码。",
     "Get the text of the currently active code window (editor).": "获取当前激活代码窗口（编辑器）的文本。",
-    "Set the text of the currently active code window. Automatically calls UpdateAll.": "设置当前激活代码窗口的文本。会自动 UpdateAll。",
     "Get the raw text of the active disassembly window.": "获取激活反汇编窗口的原始文本。",
     "Set the text of the active disassembly window.": "设置激活反汇编窗口文本。",
     "Jump to the specified line in the code window (UI only, does not modify text).": "跳到代码窗口的指定行号（仅 UI，不改文本）。",
@@ -110,5 +106,9 @@
     "function_indices must not be empty": "function_indices 不能为空",
     "module %d has no functions": "模块 %d 没有函数",
     "Set or clear a mark on one function, on several functions (function_indices), or on EVERY function of a module (omit the index arguments). Free-form text; an empty mark clears. Marks live in vbdmcp's own file next to the analyzed program, so this also works on native-compiled projects; vbd_read_function / vbd_find_function / vbd_read_marks report them.": "给一个函数、多个函数（function_indices）或整个模块的全部函数（省略索引参数）设置或清除标记。自由文本；传空串即清除。标记存放于 vbdmcp 自己的文件（在被分析程序旁），因此 native 编译的项目同样可用；vbd_read_function / vbd_find_function / vbd_read_marks 都会带出标记。",
-    "Mark several functions of the module in one call. Omit both function_index and function_indices to mark EVERY function of the module.": "一次标记模块内的多个函数。省略 function_index 与 function_indices 即标记整个模块的全部函数。"
+    "Mark several functions of the module in one call. Omit both function_index and function_indices to mark EVERY function of the module.": "一次标记模块内的多个函数。省略 function_index 与 function_indices 即标记整个模块的全部函数。",
+    "Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI. Pass include_previous=\"1\" to receive the replaced text back (it can be up to 16MB, so use it only when you need a rollback copy).": "用新文本完全替换工程文本。会自动调用 UpdateAll 提交修改并刷新界面。传 include_previous=\"1\" 可取回被替换的原文（最大可达 16MB，仅在需要回滚副本时使用）。",
+    "Clear VB Decompiler's internal decompilation buffers. DESTRUCTIVE: this discards every existing decompilation result, so the analyzed file must be re-analyzed (re-opened) before the vbd_read_* tools return data again. Use only when implementing a custom full decompilation workflow.": "清空 VB Decompiler 内部的反编译缓存。**破坏性操作**：会丢弃全部已生成的反编译结果，需重新分析（重新打开）被分析文件后 vbd_read_* 系列工具才会重新返回数据。仅在实现自定义完整反编译流程时使用。",
+    "Replace a function's code. Pass the function BODY only - without the \"Private Sub ...\" line and without the trailing \"End Sub\"; VB Decompiler adds that wrapper itself. A wrapper present in the input is stripped automatically and the response reports how many lines were removed (stripped_lines). To edit an existing function, read it with vbd_read_function and write back its \"code\" field (NOT \"code_fast\", which contains the wrapper - writing that back would duplicate it). Pass include_previous=\"1\" to get the previous code back for rollback.": "替换函数代码。只传**函数体** —— 不要包含 \"Private Sub ...\" 首行和末尾的 \"End Sub\"，这层框架由 VB Decompiler 自己补上；若输入里带了该框架会被自动剥离，并在响应的 stripped_lines 中报告剥离了几行。修改已有函数时：用 vbd_read_function 读取后写回它的 \"code\" 字段（**不要**用 \"code_fast\"，它含框架，写回会导致框架重复）。传 include_previous=\"1\" 可取回原代码以便回滚。",
+    "Set the text of the currently active code window. Automatically calls UpdateAll. Note: the host may normalize what you write, so read-back is not always byte-identical - keep your own copy of important content. include_previous=\"1\" returns the previous text for rollback.": "设置当前活动代码窗口的文本，会自动调用 UpdateAll。注意：宿主可能对写入内容做规范化，因此读回结果不保证与写入逐字节相同 —— 重要内容请自行留备份。传 include_previous=\"1\" 可取回原文本以便回滚。"
 }

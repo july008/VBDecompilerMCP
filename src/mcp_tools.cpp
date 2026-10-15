@@ -244,6 +244,123 @@ static long long parse_uint_base(const char *s, int base)
     return digits > 0 ? v : -1;
 }
 
+/* ---------------- 写入辅助 ---------------- */
+
+/* 读取 "0"/"1" 开关参数（缺省 def）。 */
+static int arg_onoff(yyjson_val *args, const char *name, int def)
+{
+    const char *s = arg_str(args, name);
+    if (!s || !*s) return def;
+    return (s[0] == '1') ? 1 : 0;
+}
+
+/* ---- include_previous：写入类工具回传"写入前的原值"，便于出错回滚 ----
+ * 用法：
+ *     char *prev = NULL;
+ *     want_previous(args, VBD_GetVBForm, (int)idx, 0, &prev);   // 写入前
+ *     ... 写入 ...
+ *     emit_previous(doc, root, prev, enc);                        // 响应中输出 + 释放
+ * 未请求 include_previous 时 prev 保持 NULL，两步都是零开销。 */
+static void want_previous(yyjson_val *args, int vl, int a, int b, char **prev)
+{
+    *prev = NULL;
+    if (arg_onoff(args, "include_previous", 0)) *prev = vbd_get_value(vl, a, b);
+}
+
+static void emit_previous(yyjson_mut_doc *doc, yyjson_mut_val *root, char *prev, int enc)
+{
+    if (!prev) return;
+    add_text(doc, root, "previous", prev, enc);
+    vbdmcp_free(prev);
+}
+
+/* ---------------- vbd_write_function 的写入规范化 ----------------
+ * 引擎的 SetModuleFunction 期望的是**函数体**（不含首行
+ * "Private Sub xxx(...) 'addr"，也不含末尾 "End Sub"），它会自己补上这层
+ * 框架。若把 vbd_read_function 的 code_fast（**含**签名与 End Sub）原样
+ * 写回，会得到重复的签名与 End Sub（实测：写回后 code_fast 出现两行签名
+ * + 两个 End Sub，代码被破坏）。因此这里做幂等处理：识别并剥离首行签名
+ * 与末尾 End * 行，让"写完整函数"与"写函数体"两种用法都安全。 */
+
+/* 首行（去掉可选修饰符后）的首关键字是否是 Sub / Function / Property */
+static int looks_like_vb_signature(const std::string& line)
+{
+    size_t i = 0;
+    while (i < line.size() && isspace((unsigned char)line[i])) i++;
+    static const char *mods[] = { "Private", "Public", "Friend", "Global", "Static", NULL };
+    for (int m = 0; mods[m]; m++) {
+        const size_t ml = strlen(mods[m]);
+        if (i + ml <= line.size() && line.compare(i, ml, mods[m]) == 0) {
+            size_t j = i + ml;
+            while (j < line.size() && isspace((unsigned char)line[j])) j++;
+            if (j == i + ml) continue;          /* 修饰符后必须有空白 */
+            i = j;
+            break;
+        }
+    }
+    static const char *kws[] = { "Sub", "Function", "Property", NULL };
+    for (int k = 0; kws[k]; k++) {
+        const size_t kl = strlen(kws[k]);
+        if (i + kl <= line.size() && line.compare(i, kl, kws[k]) == 0) {
+            const size_t m = i + kl;
+            return (m >= line.size()) || isspace((unsigned char)line[m]) ||
+                   line[m] == '(' || line[m] == '=';
+        }
+    }
+    return 0;
+}
+
+/* trim 后是否等于 End Sub / End Function / ... */
+static int is_vb_end_line(const std::string& line)
+{
+    size_t b = 0, e = line.size();
+    while (b < e && isspace((unsigned char)line[b])) b++;
+    while (e > b && isspace((unsigned char)line[e - 1])) e--;
+    const std::string t = line.substr(b, e - b);
+    static const char *ends[] = { "End Sub", "End Function", "End Property",
+                                  "End Enum", "End Type", "End Declare",
+                                  "End Structure", NULL };
+    for (int k = 0; ends[k]; k++) if (t == ends[k]) return 1;
+    return 0;
+}
+
+static int is_blank_line(const std::string& s)
+{
+    return s.find_first_not_of(" \t\r") == std::string::npos;
+}
+
+/* 把"完整函数"规范化为引擎期望的函数体。返回被剥离的行数（0 = 未剥离）。 */
+static int strip_function_wrapper(std::string *io)
+{
+    if (!io) return 0;
+    std::vector<std::string> lines;
+    size_t start = 0;
+    for (size_t i = 0; i <= io->size(); i++) {
+        if (i == io->size() || (*io)[i] == '\n') {
+            lines.push_back(io->substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    size_t last = lines.size();
+    while (last > 0 && is_blank_line(lines[last - 1])) last--;
+    size_t first = 0;
+    while (first < last && is_blank_line(lines[first])) first++;
+    if (first >= last) return 0;
+
+    int stripped = 0;
+    if (looks_like_vb_signature(lines[first])) { first++; stripped++; }
+    if (last > first && is_vb_end_line(lines[last - 1])) { last--; stripped++; }
+    if (!stripped) return 0;
+
+    std::string out;
+    for (size_t i = first; i < last; i++) {
+        out += lines[i];
+        if (i + 1 < last) out += "\n";
+    }
+    *io = out;
+    return stripped;
+}
+
 /* 分页元数据 + 把 items 数组挂到 root。
  * 遵守 MCP Best Practices 分页约定：
  *   {count, total_count, offset, limit, has_more[, next_offset], <items_key>: [...]} */
@@ -1033,6 +1150,8 @@ static char *tool_write_project_text(yyjson_val *args, int *out_err)
                text_len));
     }
 
+    char *prev = NULL;
+    want_previous(args, VBD_GetVBProject, 0, 0, &prev);
     set_text_value(VBD_SetVBProject, text, enc, 0, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
@@ -1041,6 +1160,7 @@ static char *tool_write_project_text(yyjson_val *args, int *out_err)
     if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)text_len);
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1070,6 +1190,8 @@ static char *tool_write_form(yyjson_val *args, int *out_err)
             _F("form_index %d is out of range (the project has %lld forms)", idx, form_total()));
     }
 
+    char *prev = NULL;
+    want_previous(args, VBD_GetVBForm, (int)idx, 0, &prev);
     set_text_value(VBD_SetVBForm, text, enc, (int)idx, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
@@ -1079,6 +1201,7 @@ static char *tool_write_form(yyjson_val *args, int *out_err)
     yyjson_mut_obj_add_int(doc, root, "form_index", idx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1097,6 +1220,8 @@ static char *tool_write_rename_form(yyjson_val *args, int *out_err)
     }
     if (is_native_project()) return err_json(out_err, VBDMCP_ERR_BUSINESS, _("rename_form is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
 
+    char *prev = NULL;
+    want_previous(args, VBD_GetVBFormName, (int)idx, 0, &prev);
     set_text_value(VBD_SetVBFormName, new_name, enc, (int)idx, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
@@ -1107,6 +1232,7 @@ static char *tool_write_rename_form(yyjson_val *args, int *out_err)
     /* 回显客户端原文（UTF-8），不回显引擎侧转换结果 */
     yyjson_mut_obj_add_strcpy(doc, root, "new_name", new_name);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1124,6 +1250,8 @@ static char *tool_write_module(yyjson_val *args, int *out_err)
             _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
     }
 
+    char *prev = NULL;
+    want_previous(args, VBD_GetModule, (int)idx, 0, &prev);
     set_text_value(VBD_SetModule, decl, enc, (int)idx, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
@@ -1133,6 +1261,7 @@ static char *tool_write_module(yyjson_val *args, int *out_err)
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(decl));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1150,6 +1279,8 @@ static char *tool_write_module_string_references(yyjson_val *args, int *out_err)
             _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
     }
 
+    char *prev = NULL;
+    want_previous(args, VBD_GetModuleStringReferences, (int)idx, 0, &prev);
     set_text_value(VBD_SetModuleStringReferences, refs, enc, (int)idx, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
@@ -1158,6 +1289,7 @@ static char *tool_write_module_string_references(yyjson_val *args, int *out_err)
     if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1178,15 +1310,31 @@ static char *tool_write_function(yyjson_val *args, int *out_err)
                module_function_total(midx)));
     }
 
-    set_text_value(VBD_SetModuleFunction, code, enc, (int)midx, (int)fidx);
+    /* include_previous="1" → 回传写入前的 code，便于出错回滚 */
+    const int want_prev = arg_onoff(args, "include_previous", 0);
+    char *prev_code = want_prev ? vbd_get_value(VBD_GetModuleFunction, (int)midx, (int)fidx) : NULL;
+
+    /* 幂等规范化：引擎期望**函数体**（它会自己补上签名与 End Sub），
+     * 这里剥离调用方可能带上的首行签名 / 末尾 End * 行，使"写完整函数"
+     * 与"写函数体"两种用法都安全（否则会出现重复签名 + 重复 End Sub）。 */
+    std::string body(code);
+    const int stripped = strip_function_wrapper(&body);
+
+    set_text_value(VBD_SetModuleFunction, body.c_str(), enc, (int)midx, (int)fidx);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) {
+        if (prev_code) vbdmcp_free(prev_code);
+        return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    }
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
     yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
-    yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
+    yyjson_mut_obj_add_int(doc, root, "length", (long long)body.size());
+    if (stripped) yyjson_mut_obj_add_int(doc, root, "stripped_lines", stripped);
+    if (want_prev) add_text(doc, root, "previous", prev_code ? prev_code : "", enc);
+    if (prev_code) vbdmcp_free(prev_code);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
@@ -1230,14 +1378,20 @@ static char *tool_write_sub_main(yyjson_val *args, int *out_err)
     const char *code = arg_str(args, "code");
     if (!code) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing code"));
 
+    char *prev = NULL;
+    want_previous(args, VBD_GetSubMain, 0, 0, &prev);
     set_text_value(VBD_SetSubMain, code, enc, 0, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) {
+        if (prev) vbdmcp_free(prev);
+        return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    }
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1247,14 +1401,20 @@ static char *tool_write_active_text(yyjson_val *args, int *out_err)
     const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
     if (!text) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    char *prev = NULL;
+    want_previous(args, VBD_GetActiveText, 0, 0, &prev);
     set_text_value(VBD_SetActiveText, text, enc, 0, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) {
+        if (prev) vbdmcp_free(prev);
+        return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    }
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1264,13 +1424,19 @@ static char *tool_write_active_disasm_text(yyjson_val *args, int *out_err)
     const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
     if (!text) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    char *prev = NULL;
+    want_previous(args, VBD_GetActiveDisasmText, 0, 0, &prev);
     set_text_value(VBD_SetActiveDisasmText, text, enc, 0, 0);
     vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) {
+        if (prev) vbdmcp_free(prev);
+        return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    }
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    emit_previous(doc, root, prev, enc);
     return doc_to_string(doc);
 }
 
@@ -1375,6 +1541,7 @@ typedef struct {
 #define P_FIND_PAGING   (1u << 14)
 #define P_MARK          (1u << 15)   /* 函数标记文本（自由文本；空串/缺省 = 清除） */
 #define P_FUNCTION_INDICES (1u << 16)   /* function_indices：一次多个函数（数组） */
+#define P_INCLUDE_PREVIOUS (1u << 17)   /* include_previous="1" → 回传写入前的原值 */
 
 static const tool_entry_t g_tools[] = {
     /* ---- 只读 ---- */
@@ -1395,18 +1562,18 @@ static const tool_entry_t g_tools[] = {
     { "vbd_read_list_frx_icons",      _("List icons/images in the Form's FRX file: {count, icons:[{index,offset,size}]}. Supports pagination."),         P_PAGING,                          0, 0, 1, tool_read_list_frx_icons },
 
     /* ---- 写入 ---- */
-    { "vbd_write_project_text",       _("Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI."),       P_PROJECT_TEXT,                    1, 1, 1, tool_write_project_text },
-    { "vbd_write_clear_buffers",      _("Clear VB Decompiler's internal decompilation buffers. Use only when implementing a custom full decompilation workflow; discards all existing decompilation results."),          0,                                 1, 1, 1, tool_write_clear_buffers },
-    { "vbd_write_form",               _("Replace the property text of the specified Form. Automatically calls UpdateAll."),               P_FORM_INDEX | P_FORM_TEXT,        1, 1, 1, tool_write_form },
-    { "vbd_write_rename_form",        _("Rename a Form."),            P_FORM_INDEX | P_NEW_NAME,         1, 0, 1, tool_write_rename_form },
-    { "vbd_write_module",             _("Replace the module's declarations header."),             P_MODULE_INDEX | P_DECLARATIONS,   1, 1, 1, tool_write_module },
-    { "vbd_write_module_string_references", 0,                       P_MODULE_INDEX | P_STRING_REFS,    1, 1, 1, tool_write_module_string_references },
-    { "vbd_write_function",           _("Replace a function's code."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_CODE, 1, 1, 1, tool_write_function },
+    { "vbd_write_project_text",       _("Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI. Pass include_previous=\"1\" to receive the replaced text back (it can be up to 16MB, so use it only when you need a rollback copy)."),       P_PROJECT_TEXT | P_INCLUDE_PREVIOUS,     1, 1, 1, tool_write_project_text },
+    { "vbd_write_clear_buffers",      _("Clear VB Decompiler's internal decompilation buffers. DESTRUCTIVE: this discards every existing decompilation result, so the analyzed file must be re-analyzed (re-opened) before the vbd_read_* tools return data again. Use only when implementing a custom full decompilation workflow."),          0,                                 1, 1, 1, tool_write_clear_buffers },
+    { "vbd_write_form",               _("Replace the property text of the specified Form. Automatically calls UpdateAll."),               P_FORM_INDEX | P_FORM_TEXT | P_INCLUDE_PREVIOUS, 1, 1, 1, tool_write_form },
+    { "vbd_write_rename_form",        _("Rename a Form."),            P_FORM_INDEX | P_NEW_NAME | P_INCLUDE_PREVIOUS, 1, 0, 1, tool_write_rename_form },
+    { "vbd_write_module",             _("Replace the module's declarations header."),             P_MODULE_INDEX | P_DECLARATIONS | P_INCLUDE_PREVIOUS, 1, 1, 1, tool_write_module },
+    { "vbd_write_module_string_references", 0,                       P_MODULE_INDEX | P_STRING_REFS | P_INCLUDE_PREVIOUS, 1, 1, 1, tool_write_module_string_references },
+    { "vbd_write_function",           _("Replace a function's code. Pass the function BODY only - without the \"Private Sub ...\" line and without the trailing \"End Sub\"; VB Decompiler adds that wrapper itself. A wrapper present in the input is stripped automatically and the response reports how many lines were removed (stripped_lines). To edit an existing function, read it with vbd_read_function and write back its \"code\" field (NOT \"code_fast\", which contains the wrapper - writing that back would duplicate it). Pass include_previous=\"1\" to get the previous code back for rollback."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_CODE | P_INCLUDE_PREVIOUS, 1, 1, 1, tool_write_function },
     { "vbd_write_mark_function",      _("Set or clear a mark on one function, on several functions (function_indices), or on EVERY function of a module (omit the index arguments). Free-form text; an empty mark clears. Marks live in vbdmcp's own file next to the analyzed program, so this also works on native-compiled projects; vbd_read_function / vbd_find_function / vbd_read_marks report them."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_FUNCTION_INDICES | P_MARK, 1, 0, 1, tool_write_mark_function },
     { "vbd_write_rename_function",    _("Rename a function."),        P_MODULE_INDEX | P_FUNCTION_INDEX | P_NEW_NAME, 1, 0, 1, tool_write_rename_function },
-    { "vbd_write_sub_main",           _("Set the Sub Main code."),           P_CODE,                            1, 1, 1, tool_write_sub_main },
-    { "vbd_write_active_text",        _("Set the text of the currently active code window. Automatically calls UpdateAll."),        P_TEXT,                            1, 0, 1, tool_write_active_text },
-    { "vbd_write_active_disasm_text", _("Set the text of the active disassembly window."), P_TEXT,                            1, 0, 1, tool_write_active_disasm_text },
+    { "vbd_write_sub_main",           _("Set the Sub Main code."),           P_CODE | P_INCLUDE_PREVIOUS,         1, 1, 1, tool_write_sub_main },
+    { "vbd_write_active_text",        _("Set the text of the currently active code window. Automatically calls UpdateAll. Note: the host may normalize what you write, so read-back is not always byte-identical - keep your own copy of important content. include_previous=\"1\" returns the previous text for rollback."),        P_TEXT | P_INCLUDE_PREVIOUS,         1, 0, 1, tool_write_active_text },
+    { "vbd_write_active_disasm_text", _("Set the text of the active disassembly window."), P_TEXT | P_INCLUDE_PREVIOUS,         1, 0, 1, tool_write_active_disasm_text },
     { "vbd_write_goto_line",          _("Jump to the specified line in the code window (UI only, does not modify text)."),              P_LINE,                            1, 0, 1, tool_write_goto_line },
     { "vbd_write_status",             _("Set the text of VB Decompiler's bottom status bar (used to show MCP operation progress)."),             P_TEXT,                            1, 0, 1, tool_write_status },
     { "vbd_write_options",            _("Control decompilation options: the \"Parse stack parameters\" and \"Procedure analyzer and optimizer\" checkboxes. Omitting either parameter leaves the corresponding option unchanged."),            P_OPTIONS,                         1, 0, 1, tool_write_options },
@@ -1605,6 +1772,8 @@ static void add_params(yyjson_mut_doc *doc, yyjson_mut_val *props, unsigned flag
     if (flags & P_FUNCTION_INDICES)
         param_int_array(doc, props, "function_indices",
                         _("Mark several functions of the module in one call. Omit both function_index and function_indices to mark EVERY function of the module."));
+    if (flags & P_INCLUDE_PREVIOUS)
+        param_onoff(doc, props, "include_previous");
     if (flags & P_OPTIONS) {
         param_onoff(doc, props, "stack_check");
         param_onoff(doc, props, "analyzer_check");

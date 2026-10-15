@@ -34,15 +34,11 @@
     "Get the raw text of the active disassembly window.": null,
     "Get the module/function coordinates of the currently active view (e.g. \"ModuleIndex,FunctionIndex\").": null,
     "List icons/images in the Form's FRX file: {count, icons:[{index,offset,size}]}. Supports pagination.": null,
-    "Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI.": null,
-    "Clear VB Decompiler's internal decompilation buffers. Use only when implementing a custom full decompilation workflow; discards all existing decompilation results.": null,
     "Replace the property text of the specified Form. Automatically calls UpdateAll.": null,
     "Rename a Form.": null,
     "Replace the module's declarations header.": null,
-    "Replace a function's code.": null,
     "Rename a function.": null,
     "Set the Sub Main code.": null,
-    "Set the text of the currently active code window. Automatically calls UpdateAll.": null,
     "Set the text of the active disassembly window.": null,
     "Jump to the specified line in the code window (UI only, does not modify text).": null,
     "Set the text of VB Decompiler's bottom status bar (used to show MCP operation progress).": null,
@@ -110,5 +106,9 @@
     "function_indices must not be empty": null,
     "module %d has no functions": null,
     "Set or clear a mark on one function, on several functions (function_indices), or on EVERY function of a module (omit the index arguments). Free-form text; an empty mark clears. Marks live in vbdmcp's own file next to the analyzed program, so this also works on native-compiled projects; vbd_read_function / vbd_find_function / vbd_read_marks report them.": null,
-    "Mark several functions of the module in one call. Omit both function_index and function_indices to mark EVERY function of the module.": null
+    "Mark several functions of the module in one call. Omit both function_index and function_indices to mark EVERY function of the module.": null,
+    "Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI. Pass include_previous=\"1\" to receive the replaced text back (it can be up to 16MB, so use it only when you need a rollback copy).": null,
+    "Clear VB Decompiler's internal decompilation buffers. DESTRUCTIVE: this discards every existing decompilation result, so the analyzed file must be re-analyzed (re-opened) before the vbd_read_* tools return data again. Use only when implementing a custom full decompilation workflow.": null,
+    "Replace a function's code. Pass the function BODY only - without the \"Private Sub ...\" line and without the trailing \"End Sub\"; VB Decompiler adds that wrapper itself. A wrapper present in the input is stripped automatically and the response reports how many lines were removed (stripped_lines). To edit an existing function, read it with vbd_read_function and write back its \"code\" field (NOT \"code_fast\", which contains the wrapper - writing that back would duplicate it). Pass include_previous=\"1\" to get the previous code back for rollback.": null,
+    "Set the text of the currently active code window. Automatically calls UpdateAll. Note: the host may normalize what you write, so read-back is not always byte-identical - keep your own copy of important content. include_previous=\"1\" returns the previous text for rollback.": null
 }

@@ -498,3 +498,24 @@ GUI 随之变空。**读取本身没有副作用，越界才是。**
 **与 rename 的关键区别**：`vbd_write_rename_function` 在 native 项目上会触发宿主
 模态框（已加保护直接拒绝）；标记完全不触碰工程数据，因此 **native 项目同样可用**
 （用户当前的 `VR_ONln.exe` 即是 native）。
+
+### 8.12 写入安全加固（真机逐个测试 16 个写入工具时发现）
+
+**问题**（实测踩坑）：引擎的 `SetModuleFunction` 期望的是**函数体**（不含
+`Private Sub ...` 首行与末尾 `End Sub`），它会自己补这层框架。而
+`vbd_read_function` 的 `code_fast` 字段**含**框架 —— AI 很可能直接把它写回，
+结果是**重复签名 + 重复 End Sub**，代码被破坏（测试时把
+`EZlocalyzer.Command5_Click` 写坏，已用正确格式修复还原）。
+
+**修复**：
+
+| 项 | 内容 |
+|---|---|
+| 幂等规范化 | `strip_function_wrapper()`：剥离首行签名（`[Private/Public/Friend/Global/Static] Sub/Function/Property`）与末尾 `End Sub/Function/Property/...`；"完整函数"与"纯函数体"两种写法都安全，响应回传 `stripped_lines` |
+| 文档化 | `vbd_write_function` 描述写明"只传函数体；修改已有函数时写回 `code` 字段，**不要**用 `code_fast`" |
+| `include_previous` | 9 个数据写入工具支持 `include_previous:"1"` → 响应回传 `previous`（写入前原值），出错可立即回滚；默认关闭以省上下文 |
+| 后果说明 | `vbd_write_active_text` 说明"宿主可能规范化写入内容，读回不保证逐字节相同"；`vbd_write_clear_buffers` 标注 **DESTRUCTIVE**（清空全部反编译结果，需重新分析文件） |
+
+**真机往返测试结论**：`vbd_write_module` / `_form` / `_module_string_references`
+/ `_sub_main` / `_active_disasm_text` / `_project_text` 均满足"写入 → 读回 → 回滚"
+幂等；`vbd_write_active_text` 会被宿主规范化（非幂等，需 `include_previous` 兜底）。
