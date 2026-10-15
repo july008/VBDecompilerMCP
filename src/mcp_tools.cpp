@@ -1,80 +1,107 @@
-﻿/*
- * mcp_tools.c - MCP 工具实现：把所有 VB Decompiler SDK 操作封装为 MCP 工具
+/*
+ * mcp_tools.cpp - MCP 工具实现（yyjson 版）
  *
  * 设计原则：
- *  - 工具名采用下划线风格（get_project、list_modules 等），与 MCP 客户端习惯一致。
- *  - 输入用 JSON 对象（arguments），输出也是 JSON。
- *  - 错误返回 {"error":"..."} JSON 字符串。
- *  - 大文本（project_text 等）原样返回，避免缓冲区膨胀。
+ *  - 工具名严格分为两组：
+ *      vb_read_*   只读操作（读取项目结构 / 源码 / 反编译信息 / 元数据）
+ *      vb_write_*  修改操作（保存、修改工程、覆盖导出、删除/清空项目资源）
+ *    只读模式下 listTools 只返回 vb_read_*；开启"允许写入"后才追加 vb_write_*。
+ *  - 输入为 JSON 对象（arguments），输出为 JSON：**全部使用 yyjson** 构建/解析，
+ *    删除全部手写 JSON 序列化代码。序列化统一带 YYJSON_WRITE_ALLOW_INVALID_UNICODE，
+ *    因为 VB Decompiler 引擎返回 ANSI/GBK 字节（非合法 UTF-8）。
+ *  - 业务错误返回 {"error":"..."}（isError:true 的工具结果，占用 MCP 内容通道，
+ *    不占用 JSON-RPC 错误通道）；权限/参数类错误由 dispatcher 用 VBMCP_ERR_* 分类。
  *  - 所有工具实现都假定在主线程调用（避开 Callback Engine 线程安全问题）。
- *  - 所有用户可见文本（错误消息 + tools/list 描述）经 vbmcp_t_utf8() 按
- *    VB Decompiler 主程序语言（注册表 CustomLanguage，插件加载时由
- *    VBDecompilerPluginName → vbmcp_lang_refresh() 刷新）返回 EN / ZH 的
- *    UTF-8 字符串，与 HTTP 层 application/json（UTF-8）保持一致。
  */
+
 #include "mcp_tools.h"
 #include "vbmcp.h"
-#include "lang.h"
+#include "i18n.h"
 #include <stdio.h>
 
 /* ============================================================
- * 错误响应辅助
+ * 结果构造辅助（yyjson）
  * ============================================================ */
 
-static jv_value_t *make_error(const char *msg)
-{
-    jv_value_t *err = (jv_value_t *)calloc(1, sizeof(*err));
-    if (!err) return NULL;
-    err->type = JV_OBJECT;
-    /* 直接构造 {"error":"..."} */
-    jv_value_t *v = (jv_value_t *)calloc(1, sizeof(*v));
-    if (!v) { free(err); return NULL; }
-    v->type = JV_STRING;
-    v->u.s = vbmcp_strdup(msg ? msg : "");
+/* 单线程（VB Decompiler 主线程消息循环）下，记录最近一次工具调用的错误分类。
+ * 由 err_json() 写入，dispatcher 读取后回填给调用方。 */
+static int g_tool_err = VBMCP_ERR_OK;
 
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    if (!m) { free(v); free(err); return NULL; }
-    m->key = vbmcp_strdup("error");
-    m->value = v;
-    err->u.members = m;
-    return err;
+/* 序列化并释放 mutable doc。失败时回退到一个合法的空对象。 */
+static char *doc_to_string(yyjson_mut_doc *doc)
+{
+    char *s = NULL;
+    if (doc) {
+        s = yyjson_mut_write(doc, YYJSON_WRITE_ALLOW_INVALID_UNICODE, NULL);
+        yyjson_mut_doc_free(doc);
+    }
+    if (!s) s = vbmcp_strdup("{}");
+    return s;
 }
 
-/* 把 ANSI 字符串塞进返回值对象 {"text": "..."} */
-static jv_value_t *wrap_text(const char *s)
+/* 新建 doc + 顶层 object（已 set_root）。失败返回 NULL。 */
+static yyjson_mut_doc *new_obj_doc(yyjson_mut_val **root_out)
 {
-    jv_value_t *root = (jv_value_t *)calloc(1, sizeof(*root));
-    jv_value_t *val = (jv_value_t *)calloc(1, sizeof(*val));
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    if (!root || !val || !m) { free(root); free(val); free(m); return NULL; }
-    root->type = JV_OBJECT;
-    val->type = JV_STRING;
-    val->u.s = vbmcp_strdup(s ? s : "");
-    m->key = vbmcp_strdup("text");
-    m->value = val;
-    root->u.members = m;
-    return root;
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) return NULL;
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    if (!root) { yyjson_mut_doc_free(doc); return NULL; }
+    yyjson_mut_doc_set_root(doc, root);
+    *root_out = root;
+    return doc;
 }
 
-/* 把 ANSI 字符串放进对象 {"field": "..."} */
-static jv_value_t *wrap_field(const char *field, const char *s)
+/* 业务/权限错误负载：{"error":"..."}，并记录错误分类供 dispatcher 读取。 */
+static char *err_json(int code, const char *msg)
 {
-    jv_value_t *root = (jv_value_t *)calloc(1, sizeof(*root));
-    jv_value_t *val = (jv_value_t *)calloc(1, sizeof(*val));
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    if (!root || !val || !m) { free(root); free(val); free(m); return NULL; }
-    root->type = JV_OBJECT;
-    val->type = JV_STRING;
-    val->u.s = vbmcp_strdup(s ? s : "");
-    m->key = vbmcp_strdup(field);
-    m->value = val;
-    root->u.members = m;
-    return root;
+    g_tool_err = code;
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return vbmcp_strdup("{\"error\":\"out of memory\"}");
+    yyjson_mut_obj_add_strcpy(doc, root, "error", msg ? msg : "");
+    return doc_to_string(doc);
 }
 
-/* Native 项目守护：demo/正式版 VB Decompiler 都会在 rename_* / UpdateAll 等
- * 操作触发 modal "Please fill forms and modules before call UpdateAll"，
- * 阻塞 RPC 调用栈。返回 1=是 native 项目（应拒绝），0=非 native（允许）。 */
+/* 便捷：构造 {"<key>":"<text>"}（文本来自引擎，可能是 GBK 字节）。 */
+static char *one_str_field(const char *key, const char *text)
+{
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return vbmcp_strdup("{}");
+    yyjson_mut_obj_add_strcpy(doc, root, key, text ? text : "");
+    return doc_to_string(doc);
+}
+
+/* ============================================================
+ * 参数读取辅助（读侧 yyjson API）
+ * ============================================================ */
+
+/* 读取整型参数。兼容 integer / real / 数字字符串。缺失或非法返回 def。 */
+static long long arg_int(yyjson_val *args, const char *key, long long def)
+{
+    yyjson_val *v = args ? yyjson_obj_get(args, key) : NULL;
+    if (!v) return def;
+    if (yyjson_is_num(v)) return (long long)yyjson_get_sint(v);
+    if (yyjson_is_str(v)) {
+        const char *s = yyjson_get_str(v);
+        if (!s || !*s) return def;
+        char *end = NULL;
+        long long r = strtoll(s, &end, 10);
+        return (end == s) ? def : r;
+    }
+    return def;
+}
+
+/* 读取字符串参数；缺失或非字符串返回 NULL。 */
+static const char *arg_str(yyjson_val *args, const char *key)
+{
+    yyjson_val *v = args ? yyjson_obj_get(args, key) : NULL;
+    return (v && yyjson_is_str(v)) ? yyjson_get_str(v) : NULL;
+}
+
+/* Native 项目守护：rename_* / UpdateAll 在 native 项目上会触发 modal
+ * "Please fill forms and modules before call UpdateAll"，阻塞 RPC 调用栈。
+ * 返回 1=是 native 项目（应拒绝），0=非 native（允许）。 */
 static int is_native_project(void)
 {
     char *s = vb_get_value(VB_IsNativeCompilation, 0, 0);
@@ -83,1258 +110,929 @@ static int is_native_project(void)
     return nat;
 }
 
-/* 给对象添加成员。add_str(root, "key", "value") */
-static int add_str(jv_value_t *obj, const char *key, const char *s)
+/* 安全地把整数字符串解析为 long long（容错）。 */
+static long long safe_parse_int(const char *s, long long def)
 {
-    if (!obj || obj->type != JV_OBJECT) return 0;
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    jv_value_t *v = (jv_value_t *)calloc(1, sizeof(*v));
-    if (!m || !v) { free(m); free(v); return 0; }
-    m->key = vbmcp_strdup(key);
-    v->type = JV_STRING;
-    v->u.s = vbmcp_strdup(s ? s : "");
-    m->value = v;
-    /* 加到尾部 */
-    if (!obj->u.members) obj->u.members = m;
-    else {
-        jv_member_t *t = obj->u.members;
-        while (t->next) t = t->next;
-        t->next = m;
-    }
-    return 1;
+    if (!s || !*s) return def;
+    char *end = NULL;
+    long long v = strtoll(s, &end, 10);
+    return (end == s) ? def : v;
 }
 
-static int add_int(jv_value_t *obj, const char *key, long long v)
+/* 宿主引擎的索引上界（模块/表单/函数数量级，留足余量）。
+ * 客户端可以传任意大的整数：arg_int 返回 long long，直接 (int) 截断会把
+ * 2^40 变成 0 或负数，再交给 VB Decompiler 引擎就是越界访问 → 宿主崩溃。
+ * 所以所有索引一律过这个函数校验。 */
+static const long long kMaxEngineIndex = 1000000;
+
+static int arg_index(yyjson_val *args, const char *name, int def)
 {
-    if (!obj || obj->type != JV_OBJECT) return 0;
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    jv_value_t *vv = (jv_value_t *)calloc(1, sizeof(*vv));
-    if (!m || !vv) { free(m); free(vv); return 0; }
-    m->key = vbmcp_strdup(key);
-    vv->type = JV_NUMBER;
-    vv->u.n = (double)v;
-    m->value = vv;
-    if (!obj->u.members) obj->u.members = m;
-    else {
-        jv_member_t *t = obj->u.members;
-        while (t->next) t = t->next;
-        t->next = m;
-    }
-    return 1;
+    const long long v = arg_int(args, name, def);
+    if (v < 0 || v > kMaxEngineIndex) return -1;
+    return (int)v;      /* 校验后再截断 */
 }
 
-static int add_bool(jv_value_t *obj, const char *key, int v)
-{
-    if (!obj || obj->type != JV_OBJECT) return 0;
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    jv_value_t *vv = (jv_value_t *)calloc(1, sizeof(*vv));
-    if (!m || !vv) { free(m); free(vv); return 0; }
-    m->key = vbmcp_strdup(key);
-    vv->type = JV_BOOL;
-    vv->u.b = v ? 1 : 0;
-    m->value = vv;
-    if (!obj->u.members) obj->u.members = m;
-    else {
-        jv_member_t *t = obj->u.members;
-        while (t->next) t = t->next;
-        t->next = m;
-    }
-    return 1;
-}
-
-static int add_null(jv_value_t *obj, const char *key)
-{
-    if (!obj || obj->type != JV_OBJECT) return 0;
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    jv_value_t *vv = (jv_value_t *)calloc(1, sizeof(*vv));
-    if (!m || !vv) { free(m); free(vv); return 0; }
-    m->key = vbmcp_strdup(key);
-    vv->type = JV_NULL;
-    m->value = vv;
-    if (!obj->u.members) obj->u.members = m;
-    else {
-        jv_member_t *t = obj->u.members;
-        while (t->next) t = t->next;
-        t->next = m;
-    }
-    return 1;
-}
-
-static jv_value_t *make_object(void)
-{
-    jv_value_t *o = (jv_value_t *)calloc(1, sizeof(*o));
-    if (!o) return NULL;
-    o->type = JV_OBJECT;
-    return o;
-}
-
-/* 构造空 JV_ARRAY（new alloc）。失败返回 NULL。 */
-static jv_value_t *make_array(void)
-{
-    jv_value_t *a = (jv_value_t *)calloc(1, sizeof(*a));
-    if (!a) return NULL;
-    a->type = JV_ARRAY;
-    return a;
-}
-
-/* 把 jv_value_t* push 进 JV_ARRAY。0=ok / -1=err。 */
-static int arr_push(jv_value_t *arr, jv_value_t *item)
-{
-    if (!arr || !item) return -1;
-    if (arr->u.a.count == arr->u.a.cap) {
-        size_t nc = arr->u.a.cap ? arr->u.a.cap * 2 : 4;
-        jv_value_t **ni = (jv_value_t **)calloc(nc, sizeof(jv_value_t *));
-        if (!ni) return -1;
-        if (arr->u.a.items)
-            memcpy(ni, arr->u.a.items, sizeof(jv_value_t *) * arr->u.a.count);
-        free(arr->u.a.items);
-        arr->u.a.items = ni;
-        arr->u.a.cap = nc;
-    }
-    arr->u.a.items[arr->u.a.count++] = item;
-    return 0;
-}
-
-/* 把 arr 挂到 root 的指定 key 下（如果该 key 已存在则覆盖）。 */
-static void attach_member(jv_value_t *root, const char *key, jv_value_t *arr)
-{
-    jv_member_t *m = (jv_member_t *)calloc(1, sizeof(*m));
-    if (!m) return;
-    m->key = vbmcp_strdup(key);
-    m->value = arr;
-    if (!root->u.members) {
-        root->u.members = m;
-        return;
-    }
-    jv_member_t *t = root->u.members;
-    while (t->next) t = t->next;
-    t->next = m;
-}
-
-/* 分页元数据 + 把 arr 挂到 root（key 由调用方决定）。
+/* 分页元数据 + 把 items 数组挂到 root。
  * 遵守 MCP Best Practices 分页约定：
- *   - limit/offset 必须被尊重（调用方循环时已跳过 [0, offset) 并提前 break）
- *   - 返回 {count, total_count, offset, limit, has_more, next_offset}
- *     其中 count = 实际返回项数 = arr->u.a.count
- *           total_count = 列表总项数（工具从 VB_Get*Count 拿到）
- *           next_offset  = 是否有更多；>=0 表示下次从 next_offset 开始，-1 表示结束
- * 旧的"forms"/"modules"/"functions"/"icons"键名保留以兼容已有客户端。 */
-static void apply_pagination(jv_value_t *root, const char *items_key,
-                             jv_value_t *arr,
-                             long long total_count,
-                             long long offset, long long limit)
+ *   {count, total_count, offset, limit, has_more[, next_offset], <items_key>: [...]} */
+static void apply_pagination(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                             const char *items_key, yyjson_mut_val *arr,
+                             long long total_count, long long offset, long long limit)
 {
-    long long returned = arr ? (long long)arr->u.a.count : 0;
+    long long returned = arr ? (long long)yyjson_mut_arr_size(arr) : 0;
     long long next_offset = -1;
     if (returned >= limit && (offset + returned) < total_count) {
         next_offset = offset + returned;
     }
-    add_int(root, "count", returned);
-    add_int(root, "total_count", total_count);
-    add_int(root, "offset", offset);
-    add_int(root, "limit", limit);
-    add_int(root, "has_more", (next_offset >= 0) ? 1 : 0);
-    if (next_offset >= 0) add_int(root, "next_offset", next_offset);
-    if (arr) attach_member(root, items_key, arr);
+    yyjson_mut_obj_add_int(doc, root, "count", returned);
+    yyjson_mut_obj_add_int(doc, root, "total_count", total_count);
+    yyjson_mut_obj_add_int(doc, root, "offset", offset);
+    yyjson_mut_obj_add_int(doc, root, "limit", limit);
+    yyjson_mut_obj_add_bool(doc, root, "has_more", next_offset >= 0);
+    if (next_offset >= 0) yyjson_mut_obj_add_int(doc, root, "next_offset", next_offset);
+    if (arr) yyjson_mut_obj_add_val(doc, root, items_key, arr);
 }
 
-/* 安全地把整数字符串解析为 int（容错） */
-static long long safe_parse_int(const char *s, long long def)
+/* 读分页参数（limit 默认 100 / 最大 10000，offset 默认 0）。 */
+static void read_paging(yyjson_val *args, long long *limit, long long *offset)
 {
-    if (!s || !*s) return def;
-    char *end;
-    long long v = strtoll(s, &end, 10);
-    if (end == s) return def;
-    return v;
+    long long l = arg_int(args, "limit", 100);
+    long long o = arg_int(args, "offset", 0);
+    if (l < 1) l = 1;
+    if (l > 10000) l = 10000;
+    if (o < 0) o = 0;
+    *limit = l;
+    *offset = o;
 }
 
 /* ============================================================
- * 工具实现
+ * 只读工具实现
  * ============================================================ */
 
-/* -------- 工具 1: get_project_info --------
- * 获取当前反编译项目的基本信息：源文件、编译器类型、是否native、是否打包。
- * 无参数。
- */
-static jv_value_t *tool_get_project_info(const jv_value_t *args)
+/* -------- vb_read_project_info -------- */
+static char *tool_read_project_info(yyjson_val *args)
 {
     (void)args;
-    jv_value_t *root = make_object();
-    if (!root) return make_error(vbmcp_t_utf8(T_ERR_OOM));
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
 
     char *file_name = vb_get_value(VB_GetFileName, 0, 0);
-    char *dec_path = vb_get_value(VB_GetVBDecompilerPath, 0, 0);
-    char *native = vb_get_value(VB_IsNativeCompilation, 0, 0);
-    char *compiler = vb_get_value(VB_GetCompiler, 0, 0);
-    char *packed = vb_get_value(VB_IsPacked, 0, 0);
+    char *dec_path  = vb_get_value(VB_GetVBDecompilerPath, 0, 0);
+    char *native    = vb_get_value(VB_IsNativeCompilation, 0, 0);
+    char *compiler  = vb_get_value(VB_GetCompiler, 0, 0);
+    char *packed    = vb_get_value(VB_IsPacked, 0, 0);
 
-    add_str(root, "file_name", file_name ? file_name : "");
-    add_str(root, "vbmcp_path", dec_path ? dec_path : "");
-    add_str(root, "is_native", native ? native : "");
-    add_str(root, "compiler", compiler ? compiler : "");
-    add_str(root, "is_packed", packed ? packed : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "file_name", file_name ? file_name : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "vbmcp_path", dec_path ? dec_path : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "is_native", native ? native : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "compiler", compiler ? compiler : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "is_packed", packed ? packed : "");
 
     vbmcp_free(file_name);
     vbmcp_free(dec_path);
     vbmcp_free(native);
     vbmcp_free(compiler);
     vbmcp_free(packed);
-    return root;
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 2: get_project --------
- * 返回完整反编译项目文本（可能很大）。
- */
-static jv_value_t *tool_get_project(const jv_value_t *args)
+/* -------- vb_read_project_text -------- */
+static char *tool_read_project_text(yyjson_val *args)
 {
     (void)args;
     char *text = vb_get_value(VB_GetVBProject, 0, 0);
-    if (!text) return make_error(vbmcp_t_utf8(T_ERR_NO_PROJECT));
-    jv_value_t *r = wrap_field("project_text", text);
+    if (!text) return err_json(VBMCP_ERR_BUSINESS, _("No project is currently open"));
+    char *r = one_str_field("project_text", text);
     vbmcp_free(text);
     return r;
 }
 
-/* -------- 工具 3: set_project --------
- * 用新文本替换整个项目内容。
- * 参数：project_text (string, 必填)
- */
-static jv_value_t *tool_set_project(const jv_value_t *args)
+/* -------- vb_read_list_forms -------- */
+static char *tool_read_list_forms(yyjson_val *args)
 {
-    const char *text = (args && args->type == JV_OBJECT) ? jv_obj_get_string(args, "project_text") : NULL;
-    if (!text) return make_error(vbmcp_t_utf8(T_ERR_MISSING_PROJECT_TEXT));
-
-    /* 防止客户端发 GB 级 project_text 直接撑爆 VB Decompiler。
-     * HTTP 层 VBMCP_MAX_BODY_SIZE=64MB 是兜底，这里对单个字段再收紧。 */
-    size_t text_len = strlen(text);
-    if (text_len > VBMCP_MAX_PROJECT_TEXT) {
-        char err[128];
-        _snprintf_s(err, sizeof(err), _TRUNCATE,
-            vbmcp_t_utf8(T_ERR_PROJECT_TEXT_TOO_LARGE), text_len);
-        return make_error(err);
-    }
-
-    vb_set_value(VB_SetVBProject, text, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    if (!root) return make_error(vbmcp_t_utf8(T_ERR_OOM));
-    add_str(root, "status", "ok");
-    add_int(root, "length", (long long)text_len);
-    return root;
-}
-
-/* -------- 工具 4: clear_buffers --------
- * 清空所有VB Decompiler内部缓冲（高级用法：用于完全自定义的反编译工作流）。
- */
-static jv_value_t *tool_clear_buffers(const jv_value_t *args)
-{
-    (void)args;
-    vb_set_value(VB_ClearAllBuffers, "", 0, 0);
-    jv_value_t *root = make_object();
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 5: list_forms --------
- * 列出所有 VB Form（表单），返回名称数组。
- * 无参数。
- */
-static jv_value_t *tool_list_forms(const jv_value_t *args)
-{
-    /* 分页参数：limit 默认 100，offset 默认 0。limit 最大 10000（schema 已约束）。 */
-    long long limit = 100, offset = 0;
-    if (args && args->type == JV_OBJECT) {
-        limit  = (long long)jv_obj_get_number(args, "limit",  100);
-        offset = (long long)jv_obj_get_number(args, "offset",   0);
-        if (limit  < 1)   limit  = 1;
-        if (limit  > 10000) limit = 10000;
-        if (offset < 0)   offset = 0;
-    }
+    long long limit, offset;
+    read_paging(args, &limit, &offset);
 
     char *count_str = vb_get_value(VB_GetVBFormCount, 0, 0);
     long long total = safe_parse_int(count_str, 0);
     if (count_str) vbmcp_free(count_str);
 
-    jv_value_t *root = make_object();
-    if (!root) return make_error(vbmcp_t_utf8(T_ERR_OOM));
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
 
-    jv_value_t *arr = make_array();
-    if (!arr) { free(root); return make_error(vbmcp_t_utf8(T_ERR_OOM)); }
-
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
         char *name = vb_get_value(VB_GetVBFormName, (int)i, 0);
-        jv_value_t *item = (jv_value_t *)calloc(1, sizeof(*item));
-        if (!item) { if (name) vbmcp_free(name); break; }
-        item->type = JV_STRING;
-        item->u.s = vbmcp_strdup(name ? name : "");
+        yyjson_mut_arr_add_strcpy(doc, arr, name ? name : "");
         if (name) vbmcp_free(name);
-        arr_push(arr, item);
     }
-
-    apply_pagination(root, "forms", arr, total, offset, limit);
-    return root;
+    apply_pagination(doc, root, "forms", arr, total, offset, limit);
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 6: get_form --------
- * 获取指定表单的反编译内容。
- * 参数：form_index (int, 必填，从 0 开始)
- */
-static jv_value_t *tool_get_form(const jv_value_t *args)
+/* -------- vb_read_form -------- */
+static char *tool_read_form(yyjson_val *args)
 {
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long idx = (long long)jv_obj_get_number(args, "form_index", -1);
-    if (idx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_FORM_INDEX));
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int idx = arg_index(args, "form_index", -1);
+    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
 
     char *content = vb_get_value(VB_GetVBForm, (int)idx, 0);
-    if (!content) return make_error(vbmcp_t_utf8(T_ERR_CANNOT_READ_FORM));
+    if (!content) return err_json(VBMCP_ERR_BUSINESS, _("Cannot read form content"));
 
-    jv_value_t *root = make_object();
-    add_int(root, "form_index", idx);
-    add_str(root, "form_text", content);
-    vbmcp_free(content);
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) { vbmcp_free(content); return err_json(VBMCP_ERR_INTERNAL, _("Out of memory")); }
 
-    /* 顺便返回名称 */
     char *name = vb_get_value(VB_GetVBFormName, (int)idx, 0);
-    add_str(root, "form_name", name ? name : "");
+    yyjson_mut_obj_add_int(doc, root, "form_index", idx);
+    yyjson_mut_obj_add_strcpy(doc, root, "form_name", name ? name : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "form_text", content);
     vbmcp_free(name);
-    return root;
+    vbmcp_free(content);
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 7: set_form --------
- * 修改指定表单的属性。
- * 参数：form_index (int), form_text (string)
- */
-static jv_value_t *tool_set_form(const jv_value_t *args)
+/* -------- vb_read_list_modules --------
+ * SDK 26 中 value=36 语义冲突（.h=SetModuleCount / .inc=GetModuleCount），
+ * demo 全不使用。改用 GetModuleName(0..N) 探测到 NULL/空串确定总数。 */
+#define VBMCP_MAX_MODULES 10000
+static char *tool_read_list_modules(yyjson_val *args)
 {
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long idx = (long long)jv_obj_get_number(args, "form_index", -1);
-    const char *text = jv_obj_get_string(args, "form_text");
-    if (idx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_FORM_INDEX));
-    if (!text) return make_error(vbmcp_t_utf8(T_ERR_MISSING_FORM_TEXT));
+    long long limit, offset;
+    read_paging(args, &limit, &offset);
 
-    vb_set_value(VB_SetVBForm, text, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_int(root, "form_index", idx);
-    add_int(root, "length", (long long)strlen(text));
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 8: rename_form --------
- * 重命名表单。
- */
-static jv_value_t *tool_rename_form(const jv_value_t *args)
-{
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long idx = (long long)jv_obj_get_number(args, "form_index", -1);
-    const char *new_name = jv_obj_get_string(args, "new_name");
-    if (idx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_FORM_INDEX));
-    if (!new_name) return make_error(vbmcp_t_utf8(T_ERR_MISSING_NEW_NAME));
-
-    /* Native guard: 防止 SDK 在 native 项目上弹 modal 卡死 RPC */
-    if (is_native_project()) {
-        return make_error(vbmcp_t_utf8(T_ERR_NATIVE_RENAME_FORM));
-    }
-
-    vb_set_value(VB_SetVBFormName, new_name, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_int(root, "form_index", idx);
-    add_str(root, "new_name", new_name);
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 9: list_modules --------
- * 列出所有模块（bas/cls/ctl）。
- *
- * 注：SDK 26 中 value=36 在 .h 是 SetModuleCount、.inc 是 GetModuleCount，
- * 4 个 demo 全部不使用此值，行为未定义且可能误设模块计数。
- * 因此改用 GetModuleName(0..N) 探测到 NULL/空串的方式确定 total。
- */
-#define VBMCP_MAX_MODULES 10000  /* 安全上限：项目内模块数硬上限 */
-static jv_value_t *tool_list_modules(const jv_value_t *args)
-{
-    long long limit = 100, offset = 0;
-    if (args && args->type == JV_OBJECT) {
-        limit  = (long long)jv_obj_get_number(args, "limit",  100);
-        offset = (long long)jv_obj_get_number(args, "offset",   0);
-        if (limit  < 1)   limit  = 1;
-        if (limit  > 10000) limit = 10000;
-        if (offset < 0)   offset = 0;
-    }
-
-    /* 探测阶段：循环 GetModuleName 直到 NULL/空串，缓存所有名字指针。
-     * 用指针数组缓存避免 2N 次 engine 调用。 */
     char **names = (char **)vbmcp_alloc(VBMCP_MAX_MODULES * sizeof(char *));
-    if (!names) return make_error(vbmcp_t_utf8(T_ERR_OOM));
+    if (!names) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
     long long total = 0;
     for (long long i = 0; i < VBMCP_MAX_MODULES; i++) {
         char *name = vb_get_value(VB_GetModuleName, (int)i, 0);
-        if (!name || !*name) {
-            if (name) vbmcp_free(name);
-            break;
-        }
+        if (!name || !*name) { if (name) vbmcp_free(name); break; }
         names[i] = name;
         total++;
     }
 
-    jv_value_t *root = make_object();
-    if (!root) {
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) {
         for (long long i = 0; i < total; i++) vbmcp_free(names[i]);
         vbmcp_free(names);
-        return make_error(vbmcp_t_utf8(T_ERR_OOM));
+        return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
     }
 
-    jv_value_t *arr = make_array();
-    if (!arr) {
-        for (long long i = 0; i < total; i++) vbmcp_free(names[i]);
-        vbmcp_free(names);
-        free(root);
-        return make_error(vbmcp_t_utf8(T_ERR_OOM));
-    }
-
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
-        jv_value_t *item = (jv_value_t *)calloc(1, sizeof(*item));
-        if (!item) break;
-        item->type = JV_STRING;
-        item->u.s = vbmcp_strdup(names[i]);
-        arr_push(arr, item);
+        yyjson_mut_arr_add_strcpy(doc, arr, names[i] ? names[i] : "");
     }
-
     for (long long i = 0; i < total; i++) vbmcp_free(names[i]);
     vbmcp_free(names);
 
-    apply_pagination(root, "modules", arr, total, offset, limit);
-    return root;
+    apply_pagination(doc, root, "modules", arr, total, offset, limit);
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 10: get_module --------
- * 获取模块的声明头（declarations）。
- * 参数：module_index (int)
- */
-static jv_value_t *tool_get_module(const jv_value_t *args)
+/* -------- vb_read_module -------- */
+static char *tool_read_module(yyjson_val *args)
 {
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long idx = (long long)jv_obj_get_number(args, "module_index", -1);
-    if (idx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_MODULE_INDEX));
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int idx = arg_index(args, "module_index", -1);
+    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
 
     char *content = vb_get_value(VB_GetModule, (int)idx, 0);
-    char *name = vb_get_value(VB_GetModuleName, (int)idx, 0);
+    char *name    = vb_get_value(VB_GetModuleName, (int)idx, 0);
     char *str_ref = vb_get_value(VB_GetModuleStringReferences, (int)idx, 0);
 
-    jv_value_t *root = make_object();
-    add_int(root, "module_index", idx);
-    add_str(root, "module_name", name ? name : "");
-    add_str(root, "declarations", content ? content : "");
-    add_str(root, "string_references", str_ref ? str_ref : "");
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) {
+        vbmcp_free(content); vbmcp_free(name); vbmcp_free(str_ref);
+        return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    }
+    yyjson_mut_obj_add_int(doc, root, "module_index", idx);
+    yyjson_mut_obj_add_strcpy(doc, root, "module_name", name ? name : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "declarations", content ? content : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "string_references", str_ref ? str_ref : "");
 
     vbmcp_free(content);
     vbmcp_free(name);
     vbmcp_free(str_ref);
-    return root;
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 11: set_module --------
- * 替换模块声明。
- */
-static jv_value_t *tool_set_module(const jv_value_t *args)
+/* -------- vb_read_list_module_functions -------- */
+static char *tool_read_list_module_functions(yyjson_val *args)
 {
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long idx = (long long)jv_obj_get_number(args, "module_index", -1);
-    const char *decl = jv_obj_get_string(args, "declarations");
-    if (idx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_MODULE_INDEX));
-    if (!decl) return make_error(vbmcp_t_utf8(T_ERR_MISSING_DECLARATIONS));
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int idx = arg_index(args, "module_index", -1);
+    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
 
-    vb_set_value(VB_SetModule, decl, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_int(root, "module_index", idx);
-    add_int(root, "length", (long long)strlen(decl));
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 12: set_module_string_references --------
- */
-static jv_value_t *tool_set_module_string_references(const jv_value_t *args)
-{
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long idx = (long long)jv_obj_get_number(args, "module_index", -1);
-    const char *refs = jv_obj_get_string(args, "string_references");
-    if (idx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_MODULE_INDEX));
-    if (!refs) return make_error(vbmcp_t_utf8(T_ERR_MISSING_STRING_REFERENCES));
-
-    vb_set_value(VB_SetModuleStringReferences, refs, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_int(root, "module_index", idx);
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 13: list_module_functions --------
- * 列出模块内的所有函数/子例程。
- * 参数：module_index (int)
- * 返回：[{name, address}, ...]
- */
-static jv_value_t *tool_list_module_functions(const jv_value_t *args)
-{
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long idx = (long long)jv_obj_get_number(args, "module_index", -1);
-    if (idx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_MODULE_INDEX));
-
-    long long limit = 100, offset = 0;
-    limit  = (long long)jv_obj_get_number(args, "limit",  100);
-    offset = (long long)jv_obj_get_number(args, "offset",   0);
-    if (limit  < 1)   limit  = 1;
-    if (limit  > 10000) limit = 10000;
-    if (offset < 0)   offset = 0;
+    long long limit, offset;
+    read_paging(args, &limit, &offset);
 
     char *count_str = vb_get_value(VB_GetModuleFunctionCount, (int)idx, 0);
     long long total = safe_parse_int(count_str, 0);
     if (count_str) vbmcp_free(count_str);
 
-    jv_value_t *root = make_object();
-    if (!root) return make_error(vbmcp_t_utf8(T_ERR_OOM));
-    add_int(root, "module_index", idx);
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "module_index", idx);
 
-    jv_value_t *arr = make_array();
-    if (!arr) { free(root); return make_error(vbmcp_t_utf8(T_ERR_OOM)); }
-
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
         char *name = vb_get_value(VB_GetModuleFunctionName, (int)idx, (int)i);
         char *addr = vb_get_value(VB_GetModuleFunctionAddress, (int)idx, (int)i);
-
-        jv_value_t *item = make_object();
-        if (!item) { if (name) vbmcp_free(name); if (addr) vbmcp_free(addr); break; }
-        add_str(item, "name", name ? name : "");
-        add_str(item, "address", addr ? addr : "");
-        add_int(item, "index", i);
-
+        yyjson_mut_val *item = yyjson_mut_arr_add_obj(doc, arr);
+        if (item) {
+            yyjson_mut_obj_add_strcpy(doc, item, "name", name ? name : "");
+            yyjson_mut_obj_add_strcpy(doc, item, "address", addr ? addr : "");
+            yyjson_mut_obj_add_int(doc, item, "index", i);
+        }
         if (name) vbmcp_free(name);
         if (addr) vbmcp_free(addr);
-
-        arr_push(arr, item);
     }
-
-    apply_pagination(root, "functions", arr, total, offset, limit);
-    return root;
+    apply_pagination(doc, root, "functions", arr, total, offset, limit);
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 14: get_function --------
- * 获取函数反编译代码。
- * 参数：module_index, function_index
- */
-static jv_value_t *tool_get_function(const jv_value_t *args)
+/* -------- vb_read_function -------- */
+static char *tool_read_function(yyjson_val *args)
 {
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long midx = (long long)jv_obj_get_number(args, "module_index", -1);
-    long long fidx = (long long)jv_obj_get_number(args, "function_index", -1);
-    if (midx < 0 || fidx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_MODULE_FUNCTION_INDEX));
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int midx = arg_index(args, "module_index", -1);
+    int fidx = arg_index(args, "function_index", -1);
+    if (midx < 0 || fidx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
 
-    char *name = vb_get_value(VB_GetModuleFunctionName, (int)midx, (int)fidx);
-    char *addr = vb_get_value(VB_GetModuleFunctionAddress, (int)midx, (int)fidx);
-    char *code = vb_get_value(VB_GetModuleFunction, (int)midx, (int)fidx);
+    char *name      = vb_get_value(VB_GetModuleFunctionName, (int)midx, (int)fidx);
+    char *addr      = vb_get_value(VB_GetModuleFunctionAddress, (int)midx, (int)fidx);
+    char *code      = vb_get_value(VB_GetModuleFunction, (int)midx, (int)fidx);
     char *code_fast = vb_get_value(VB_GetModuleFunctionCode, (int)midx, (int)fidx);
-    char *str_ref = vb_get_value(VB_GetModuleFunctionStrRef, (int)midx, (int)fidx);
-    char *disasm = vb_get_value(VB_GetModuleFunctionDisasm, (int)midx, (int)fidx);
+    char *str_ref   = vb_get_value(VB_GetModuleFunctionStrRef, (int)midx, (int)fidx);
+    char *disasm    = vb_get_value(VB_GetModuleFunctionDisasm, (int)midx, (int)fidx);
 
-    jv_value_t *root = make_object();
-    add_int(root, "module_index", midx);
-    add_int(root, "function_index", fidx);
-    add_str(root, "name", name ? name : "");
-    add_str(root, "address", addr ? addr : "");
-    add_str(root, "code", code ? code : "");
-    add_str(root, "code_fast", code_fast ? code_fast : "");
-    add_str(root, "string_references", str_ref ? str_ref : "");
-    add_str(root, "disassembly", disasm ? disasm : "");
-
-    if (name) vbmcp_free(name);
-    if (addr) vbmcp_free(addr);
-    if (code) vbmcp_free(code);
-    if (code_fast) vbmcp_free(code_fast);
-    if (str_ref) vbmcp_free(str_ref);
-    if (disasm) vbmcp_free(disasm);
-    return root;
-}
-
-/* -------- 工具 15: set_function --------
- * 替换函数代码。
- */
-static jv_value_t *tool_set_function(const jv_value_t *args)
-{
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long midx = (long long)jv_obj_get_number(args, "module_index", -1);
-    long long fidx = (long long)jv_obj_get_number(args, "function_index", -1);
-    const char *code = jv_obj_get_string(args, "code");
-    if (midx < 0 || fidx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_MODULE_FUNCTION_INDEX));
-    if (!code) return make_error(vbmcp_t_utf8(T_ERR_MISSING_CODE));
-
-    vb_set_value(VB_SetModuleFunction, code, (int)midx, (int)fidx);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_int(root, "module_index", midx);
-    add_int(root, "function_index", fidx);
-    add_int(root, "length", (long long)strlen(code));
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 16: rename_function --------
- */
-static jv_value_t *tool_rename_function(const jv_value_t *args)
-{
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long midx = (long long)jv_obj_get_number(args, "module_index", -1);
-    long long fidx = (long long)jv_obj_get_number(args, "function_index", -1);
-    const char *new_name = jv_obj_get_string(args, "new_name");
-    if (midx < 0 || fidx < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_MODULE_FUNCTION_INDEX));
-    if (!new_name) return make_error(vbmcp_t_utf8(T_ERR_MISSING_NEW_NAME));
-
-    /* Native 守护（防止 modal 弹窗阻塞）： */
-    if (is_native_project()) {
-        return make_error(vbmcp_t_utf8(T_ERR_NATIVE_RENAME_FUNCTION));
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) {
+        vbmcp_free(name); vbmcp_free(addr); vbmcp_free(code);
+        vbmcp_free(code_fast); vbmcp_free(str_ref); vbmcp_free(disasm);
+        return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
     }
+    yyjson_mut_obj_add_int(doc, root, "module_index", midx);
+    yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
+    yyjson_mut_obj_add_strcpy(doc, root, "name", name ? name : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "address", addr ? addr : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "code", code ? code : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "code_fast", code_fast ? code_fast : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "string_references", str_ref ? str_ref : "");
+    yyjson_mut_obj_add_strcpy(doc, root, "disassembly", disasm ? disasm : "");
 
-    vb_set_value(VB_SetModuleFunctionName, new_name, (int)midx, (int)fidx);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_int(root, "module_index", midx);
-    add_int(root, "function_index", fidx);
-    add_str(root, "new_name", new_name);
-    add_str(root, "status", "ok");
-    return root;
+    vbmcp_free(name);
+    vbmcp_free(addr);
+    vbmcp_free(code);
+    vbmcp_free(code_fast);
+    vbmcp_free(str_ref);
+    vbmcp_free(disasm);
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 17: get_sub_main --------
- * 获取程序的 Sub Main 入口。
- */
-static jv_value_t *tool_get_sub_main(const jv_value_t *args)
+/* -------- vb_read_sub_main -------- */
+static char *tool_read_sub_main(yyjson_val *args)
 {
     (void)args;
     char *code = vb_get_value(VB_GetSubMain, 0, 0);
-    if (!code) return wrap_field("code", "");
-    jv_value_t *r = wrap_field("code", code);
-    vbmcp_free(code);
+    char *r = one_str_field("code", code ? code : "");
+    if (code) vbmcp_free(code);
     return r;
 }
 
-/* -------- 工具 18: set_sub_main --------
- */
-static jv_value_t *tool_set_sub_main(const jv_value_t *args)
-{
-    const char *code = (args && args->type == JV_OBJECT) ? jv_obj_get_string(args, "code") : NULL;
-    if (!code) return make_error(vbmcp_t_utf8(T_ERR_MISSING_CODE));
-
-    vb_set_value(VB_SetSubMain, code, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_str(root, "status", "ok");
-    add_int(root, "length", (long long)strlen(code));
-    return root;
-}
-
-/* -------- 工具 19: get_active_text --------
- * 获取当前激活窗口（代码编辑器）的文本。
- */
-static jv_value_t *tool_get_active_text(const jv_value_t *args)
+/* -------- vb_read_active_text -------- */
+static char *tool_read_active_text(yyjson_val *args)
 {
     (void)args;
     char *text = vb_get_value(VB_GetActiveText, 0, 0);
-    jv_value_t *r = wrap_field("text", text ? text : "");
+    char *r = one_str_field("text", text ? text : "");
     if (text) vbmcp_free(text);
     return r;
 }
 
-/* -------- 工具 20: set_active_text --------
- * 设置当前激活窗口的文本。
- */
-static jv_value_t *tool_set_active_text(const jv_value_t *args)
-{
-    const char *text = (args && args->type == JV_OBJECT) ? jv_obj_get_string(args, "text") : NULL;
-    if (!text) return make_error(vbmcp_t_utf8(T_ERR_MISSING_TEXT));
-    vb_set_value(VB_SetActiveText, text, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_str(root, "status", "ok");
-    add_int(root, "length", (long long)strlen(text));
-    return root;
-}
-
-/* -------- 工具 21: get_active_disasm_text --------
- * 获取当前激活反汇编窗口的原始文本。
- */
-static jv_value_t *tool_get_active_disasm_text(const jv_value_t *args)
+/* -------- vb_read_active_disasm_text -------- */
+static char *tool_read_active_disasm_text(yyjson_val *args)
 {
     (void)args;
     char *text = vb_get_value(VB_GetActiveDisasmText, 0, 0);
-    jv_value_t *r = wrap_field("text", text ? text : "");
+    char *r = one_str_field("text", text ? text : "");
     if (text) vbmcp_free(text);
     return r;
 }
 
-/* -------- 工具 22: set_active_disasm_text --------
- */
-static jv_value_t *tool_set_active_disasm_text(const jv_value_t *args)
-{
-    const char *text = (args && args->type == JV_OBJECT) ? jv_obj_get_string(args, "text") : NULL;
-    if (!text) return make_error(vbmcp_t_utf8(T_ERR_MISSING_TEXT));
-    vb_set_value(VB_SetActiveDisasmText, text, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 23: set_active_text_line --------
- * 跳到当前激活窗口的指定行。
- */
-static jv_value_t *tool_set_active_text_line(const jv_value_t *args)
-{
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    long long line = (long long)jv_obj_get_number(args, "line", -1);
-    if (line < 0) return make_error(vbmcp_t_utf8(T_ERR_BAD_LINE));
-
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%lld", line);
-    vb_set_value(VB_SetActiveTextLine, buf, 0, 0);
-
-    jv_value_t *root = make_object();
-    add_int(root, "line", line);
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 24: get_active_module_coordinats --------
- * 获取当前激活视图的模块/函数坐标。
- */
-static jv_value_t *tool_get_active_module_coordinats(const jv_value_t *args)
+/* -------- vb_read_active_coords -------- */
+static char *tool_read_active_coords(yyjson_val *args)
 {
     (void)args;
     char *s = vb_get_value(VB_GetActiveModuleCoordinats, 0, 0);
-    jv_value_t *r = wrap_field("coordinates", s ? s : "");
+    char *r = one_str_field("coordinates", s ? s : "");
     if (s) vbmcp_free(s);
     return r;
 }
 
-/* -------- 工具 25: set_status_bar_text --------
- * 改变VB Decompiler状态栏文本。
- */
-static jv_value_t *tool_set_status_bar_text(const jv_value_t *args)
+/* -------- vb_read_list_frx_icons -------- */
+static char *tool_read_list_frx_icons(yyjson_val *args)
 {
-    const char *text = (args && args->type == JV_OBJECT) ? jv_obj_get_string(args, "text") : NULL;
-    if (!text) return make_error(vbmcp_t_utf8(T_ERR_MISSING_TEXT));
-    vb_set_status(text);
-
-    jv_value_t *root = make_object();
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 26: set_options --------
- * 设置"解析栈参数"和"过程分析器/优化器"复选框状态。
- */
-static jv_value_t *tool_set_options(const jv_value_t *args)
-{
-    if (!args || args->type != JV_OBJECT) return make_error(vbmcp_t_utf8(T_ERR_MISSING_ARGS));
-    const char *stack = jv_obj_get_string(args, "stack_check");
-    const char *analyzer = jv_obj_get_string(args, "analyzer_check");
-    if (stack) vb_set_value(VB_SetStackCheckBoxValue, stack, 0, 0);
-    if (analyzer) vb_set_value(VB_SetAnalyzerCheckBoxValue, analyzer, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
-
-    jv_value_t *root = make_object();
-    if (stack) add_str(root, "stack_check", stack);
-    if (analyzer) add_str(root, "analyzer_check", analyzer);
-    add_str(root, "status", "ok");
-    return root;
-}
-
-/* -------- 工具 27: list_frx_icons --------
- * 列出 FRX 中的图标/图像资源。
- */
-static jv_value_t *tool_list_frx_icons(const jv_value_t *args)
-{
-    long long limit = 100, offset = 0;
-    if (args && args->type == JV_OBJECT) {
-        limit  = (long long)jv_obj_get_number(args, "limit",  100);
-        offset = (long long)jv_obj_get_number(args, "offset",   0);
-        if (limit  < 1)   limit  = 1;
-        if (limit  > 10000) limit = 10000;
-        if (offset < 0)   offset = 0;
-    }
+    long long limit, offset;
+    read_paging(args, &limit, &offset);
 
     char *count_str = vb_get_value(VB_GetFrxIconCount, 0, 0);
     long long total = safe_parse_int(count_str, 0);
     if (count_str) vbmcp_free(count_str);
 
-    jv_value_t *root = make_object();
-    if (!root) return make_error(vbmcp_t_utf8(T_ERR_OOM));
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
 
-    jv_value_t *arr = make_array();
-    if (!arr) { free(root); return make_error(vbmcp_t_utf8(T_ERR_OOM)); }
-
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
-        char *off = vb_get_value(VB_GetFrxIconOffset, (int)i, 0);
+        char *off  = vb_get_value(VB_GetFrxIconOffset, (int)i, 0);
         char *size = vb_get_value(VB_GetFrxIconSize, (int)i, 0);
-
-        jv_value_t *item = make_object();
-        if (!item) { if (off) vbmcp_free(off); if (size) vbmcp_free(size); break; }
-        add_int(item, "index", i);
-        add_str(item, "offset", off ? off : "");
-        add_str(item, "size", size ? size : "");
+        yyjson_mut_val *item = yyjson_mut_arr_add_obj(doc, arr);
+        if (item) {
+            yyjson_mut_obj_add_int(doc, item, "index", i);
+            yyjson_mut_obj_add_strcpy(doc, item, "offset", off ? off : "");
+            yyjson_mut_obj_add_strcpy(doc, item, "size", size ? size : "");
+        }
         if (off) vbmcp_free(off);
         if (size) vbmcp_free(size);
-
-        arr_push(arr, item);
     }
-
-    apply_pagination(root, "icons", arr, total, offset, limit);
-    return root;
+    apply_pagination(doc, root, "icons", arr, total, offset, limit);
+    return doc_to_string(doc);
 }
 
-/* -------- 工具 28: set_module_string_references (已实现见上，这里导入) --*/
+/* ============================================================
+ * 写入工具实现
+ * ============================================================ */
 
-/* -------- 工具 29: update_all --------
- * 等同于内部 UpdateAll 命令：提交所有修改并刷新 GUI。
- */
-static jv_value_t *tool_update_all(const jv_value_t *args)
+/* -------- vb_write_project_text -------- */
+static char *tool_write_project_text(yyjson_val *args)
+{
+    const char *text = arg_str(args, "project_text");
+    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing required parameter: project_text"));
+
+    size_t text_len = strlen(text);
+    if (text_len > VBMCP_MAX_PROJECT_TEXT) {
+        return err_json(VBMCP_ERR_INVALID_PARAMS,
+            _F("project_text exceeds the 16MB limit (actual %zu bytes); please write it in chunks",
+               text_len));
+    }
+
+    vb_set_value(VB_SetVBProject, text, 0, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    yyjson_mut_obj_add_int(doc, root, "length", (long long)text_len);
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_clear_buffers -------- */
+static char *tool_write_clear_buffers(yyjson_val *args)
+{
+    (void)args;
+    vb_set_value(VB_ClearAllBuffers, "", 0, 0);
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_form -------- */
+static char *tool_write_form(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int idx = arg_index(args, "form_index", -1);
+    const char *text = arg_str(args, "form_text");
+    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing form_text"));
+
+    vb_set_value(VB_SetVBForm, text, (int)idx, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "form_index", idx);
+    yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_rename_form -------- */
+static char *tool_write_rename_form(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int idx = arg_index(args, "form_index", -1);
+    const char *new_name = arg_str(args, "new_name");
+    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (!new_name) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if (is_native_project()) return err_json(VBMCP_ERR_BUSINESS, _("rename_form is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
+
+    vb_set_value(VB_SetVBFormName, new_name, (int)idx, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "form_index", idx);
+    yyjson_mut_obj_add_strcpy(doc, root, "new_name", new_name);
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_module -------- */
+static char *tool_write_module(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int idx = arg_index(args, "module_index", -1);
+    const char *decl = arg_str(args, "declarations");
+    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (!decl) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing declarations"));
+
+    vb_set_value(VB_SetModule, decl, (int)idx, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "module_index", idx);
+    yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(decl));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_module_string_references -------- */
+static char *tool_write_module_string_references(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int idx = arg_index(args, "module_index", -1);
+    const char *refs = arg_str(args, "string_references");
+    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (!refs) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing string_references"));
+
+    vb_set_value(VB_SetModuleStringReferences, refs, (int)idx, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "module_index", idx);
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_function -------- */
+static char *tool_write_function(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int midx = arg_index(args, "module_index", -1);
+    int fidx = arg_index(args, "function_index", -1);
+    const char *code = arg_str(args, "code");
+    if (midx < 0 || fidx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (!code) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
+
+    vb_set_value(VB_SetModuleFunction, code, (int)midx, (int)fidx);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "module_index", midx);
+    yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
+    yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_rename_function -------- */
+static char *tool_write_rename_function(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int midx = arg_index(args, "module_index", -1);
+    int fidx = arg_index(args, "function_index", -1);
+    const char *new_name = arg_str(args, "new_name");
+    if (midx < 0 || fidx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (!new_name) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if (is_native_project()) return err_json(VBMCP_ERR_BUSINESS, _("rename_function is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
+
+    vb_set_value(VB_SetModuleFunctionName, new_name, (int)midx, (int)fidx);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "module_index", midx);
+    yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
+    yyjson_mut_obj_add_strcpy(doc, root, "new_name", new_name);
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_sub_main -------- */
+static char *tool_write_sub_main(yyjson_val *args)
+{
+    const char *code = arg_str(args, "code");
+    if (!code) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
+
+    vb_set_value(VB_SetSubMain, code, 0, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_active_text -------- */
+static char *tool_write_active_text(yyjson_val *args)
+{
+    const char *text = arg_str(args, "text");
+    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    vb_set_value(VB_SetActiveText, text, 0, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_active_disasm_text -------- */
+static char *tool_write_active_disasm_text(yyjson_val *args)
+{
+    const char *text = arg_str(args, "text");
+    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    vb_set_value(VB_SetActiveDisasmText, text, 0, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_goto_line -------- */
+static char *tool_write_goto_line(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    int line = arg_index(args, "line", -1);
+    if (line < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid line"));
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", line);
+    vb_set_value(VB_SetActiveTextLine, buf, 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_int(doc, root, "line", line);
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_status -------- */
+static char *tool_write_status(yyjson_val *args)
+{
+    const char *text = arg_str(args, "text");
+    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    vb_set_status(text);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_options -------- */
+static char *tool_write_options(yyjson_val *args)
+{
+    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const char *stack    = arg_str(args, "stack_check");
+    const char *analyzer = arg_str(args, "analyzer_check");
+    if (stack)    vb_set_value(VB_SetStackCheckBoxValue, stack, 0, 0);
+    if (analyzer) vb_set_value(VB_SetAnalyzerCheckBoxValue, analyzer, 0, 0);
+    vb_set_value(VB_UpdateAll, "", 0, 0);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (stack)    yyjson_mut_obj_add_strcpy(doc, root, "stack_check", stack);
+    if (analyzer) yyjson_mut_obj_add_strcpy(doc, root, "analyzer_check", analyzer);
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
+}
+
+/* -------- vb_write_update_all -------- */
+static char *tool_write_update_all(yyjson_val *args)
 {
     (void)args;
     vb_set_value(VB_UpdateAll, "", 0, 0);
-    jv_value_t *root = make_object();
-    add_str(root, "status", "ok");
-    return root;
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
+    return doc_to_string(doc);
 }
 
 /* ============================================================
- * 工具分发
+ * 工具表 + 分发
  * ============================================================ */
+
+typedef char *(*tool_impl_fn)(yyjson_val *args);
 
 typedef struct {
     const char *name;
-    jv_value_t *(*impl)(const jv_value_t *args);
+    const char *desc;       /* msgid */
+    unsigned    params;     /* P_* 位掩码 */
+    int         is_write;   /* 1 = vb_write_*（需"允许写入"） */
+    int         destructive;
+    int         idempotent;
+    tool_impl_fn impl;
 } tool_entry_t;
 
+/* 参数形状位掩码 */
+#define P_PAGING        (1u << 0)
+#define P_FORM_INDEX    (1u << 1)
+#define P_PROJECT_TEXT  (1u << 2)
+#define P_MODULE_INDEX  (1u << 3)
+#define P_FUNCTION_INDEX (1u << 4)
+#define P_FORM_TEXT     (1u << 5)
+#define P_NEW_NAME      (1u << 6)
+#define P_TEXT          (1u << 7)
+#define P_LINE          (1u << 8)
+#define P_CODE          (1u << 9)
+#define P_DECLARATIONS  (1u << 10)
+#define P_STRING_REFS   (1u << 11)
+#define P_OPTIONS       (1u << 12)
+
 static const tool_entry_t g_tools[] = {
-    { "vb_get_project_info",           tool_get_project_info },
-    { "vb_get_project_text",           tool_get_project },
-    { "vb_set_project_text",           tool_set_project },
-    { "vb_clear_buffers",              tool_clear_buffers },
-    { "vb_list_forms",                 tool_list_forms },
-    { "vb_get_form",                   tool_get_form },
-    { "vb_set_form",                   tool_set_form },
-    { "vb_rename_form",                tool_rename_form },
-    { "vb_list_modules",               tool_list_modules },
-    { "vb_get_module",                 tool_get_module },
-    { "vb_set_module",                 tool_set_module },
-    { "vb_list_module_functions",      tool_list_module_functions },
-    { "vb_get_function",               tool_get_function },
-    { "vb_set_function",               tool_set_function },
-    { "vb_rename_function",            tool_rename_function },
-    { "vb_get_sub_main",               tool_get_sub_main },
-    { "vb_set_sub_main",               tool_set_sub_main },
-    { "vb_get_active_text",            tool_get_active_text },
-    { "vb_set_active_text",            tool_set_active_text },
-    { "vb_get_active_disasm_text",     tool_get_active_disasm_text },
-    { "vb_set_active_disasm_text",     tool_set_active_disasm_text },
-    { "vb_goto_line",                  tool_set_active_text_line },
-    { "vb_get_active_coords",          tool_get_active_module_coordinats },
-    { "vb_set_status",                 tool_set_status_bar_text },
-    { "vb_set_options",                tool_set_options },
-    { "vb_list_frx_icons",             tool_list_frx_icons },
-    { "vb_update_all",                 tool_update_all },
-    { NULL, NULL }
+    /* ---- 只读 ---- */
+    { "vb_read_project_info",        _("Get metadata of the project currently open in VB Decompiler: source file path, whether it is natively compiled, compiler type (VB/.NET/Delphi/Unknown), whether it is packed, and the VB Decompiler installation path. No parameters."),           0,                                 0, 0, 1, tool_read_project_info },
+    { "vb_read_project_text",        _("Get the complete decompiled text of the entire project. Returns a large string (possibly very long, containing all Forms/Modules/Functions)."),           0,                                 0, 0, 1, tool_read_project_text },
+    { "vb_read_list_forms",          _("List all VB Forms in the project. Supports pagination (limit/offset). Returns {count, forms:[...]}."),             P_PAGING,                          0, 0, 1, tool_read_list_forms },
+    { "vb_read_form",                _("Get the decompiled property text of the specified Form. Returns {form_index, form_name, form_text}."),               P_FORM_INDEX,                      0, 0, 1, tool_read_form },
+    { "vb_read_list_modules",        _("List all Modules in the project (standard .bas, class .cls, control .ctl). Supports pagination. Returns {count, modules:[...]}."),           P_PAGING,                          0, 0, 1, tool_read_list_modules },
+    { "vb_read_module",              _("Get the module's declarations header (all function/constant/type declarations) and string references."),             P_MODULE_INDEX,                    0, 0, 1, tool_read_module },
+    { "vb_read_list_module_functions", _("List all functions in the specified module. Supports pagination. Returns {module_index, count, functions:[{name,address,index}...]}."), P_MODULE_INDEX | P_PAGING,        0, 0, 1, tool_read_list_module_functions },
+    { "vb_read_function",            _("Get a function's decompiled code plus multiple views (fast/disassembly/string references). Returns {module_index, function_index, name, address, code, code_fast, disassembly, string_references}."),           P_MODULE_INDEX | P_FUNCTION_INDEX, 0, 0, 1, tool_read_function },
+    { "vb_read_sub_main",            _("Get the code of the program entry point Sub Main. No parameters."),           0,                                 0, 0, 1, tool_read_sub_main },
+    { "vb_read_active_text",         _("Get the text of the currently active code window (editor)."),        0,                                 0, 0, 1, tool_read_active_text },
+    { "vb_read_active_disasm_text",  _("Get the raw text of the active disassembly window."), 0,                                 0, 0, 1, tool_read_active_disasm_text },
+    { "vb_read_active_coords",       _("Get the module/function coordinates of the currently active view (e.g. \"ModuleIndex,FunctionIndex\")."),      0,                                 0, 0, 1, tool_read_active_coords },
+    { "vb_read_list_frx_icons",      _("List icons/images in the Form's FRX file: {count, icons:[{index,offset,size}]}. Supports pagination."),         P_PAGING,                          0, 0, 1, tool_read_list_frx_icons },
+
+    /* ---- 写入 ---- */
+    { "vb_write_project_text",       _("Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI."),       P_PROJECT_TEXT,                    1, 1, 1, tool_write_project_text },
+    { "vb_write_clear_buffers",      _("Clear VB Decompiler's internal decompilation buffers. Use only when implementing a custom full decompilation workflow; discards all existing decompilation results."),          0,                                 1, 1, 1, tool_write_clear_buffers },
+    { "vb_write_form",               _("Replace the property text of the specified Form. Automatically calls UpdateAll."),               P_FORM_INDEX | P_FORM_TEXT,        1, 1, 1, tool_write_form },
+    { "vb_write_rename_form",        _("Rename a Form."),            P_FORM_INDEX | P_NEW_NAME,         1, 0, 1, tool_write_rename_form },
+    { "vb_write_module",             _("Replace the module's declarations header."),             P_MODULE_INDEX | P_DECLARATIONS,   1, 1, 1, tool_write_module },
+    { "vb_write_module_string_references", 0,                       P_MODULE_INDEX | P_STRING_REFS,    1, 1, 1, tool_write_module_string_references },
+    { "vb_write_function",           _("Replace a function's code."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_CODE, 1, 1, 1, tool_write_function },
+    { "vb_write_rename_function",    _("Rename a function."),        P_MODULE_INDEX | P_FUNCTION_INDEX | P_NEW_NAME, 1, 0, 1, tool_write_rename_function },
+    { "vb_write_sub_main",           _("Set the Sub Main code."),           P_CODE,                            1, 1, 1, tool_write_sub_main },
+    { "vb_write_active_text",        _("Set the text of the currently active code window. Automatically calls UpdateAll."),        P_TEXT,                            1, 0, 1, tool_write_active_text },
+    { "vb_write_active_disasm_text", _("Set the text of the active disassembly window."), P_TEXT,                            1, 0, 1, tool_write_active_disasm_text },
+    { "vb_write_goto_line",          _("Jump to the specified line in the code window (UI only, does not modify text)."),              P_LINE,                            1, 0, 1, tool_write_goto_line },
+    { "vb_write_status",             _("Set the text of VB Decompiler's bottom status bar (used to show MCP operation progress)."),             P_TEXT,                            1, 0, 1, tool_write_status },
+    { "vb_write_options",            _("Control decompilation options: the \"Parse stack parameters\" and \"Procedure analyzer and optimizer\" checkboxes. Omitting either parameter leaves the corresponding option unchanged."),            P_OPTIONS,                         1, 0, 1, tool_write_options },
+    { "vb_write_update_all",         _("Commit all Set modifications and refresh the GUI (tools normally call this automatically; call manually only after modifying large amounts of data externally)."),             0,                                 1, 0, 1, tool_write_update_all },
+
+    { NULL, NULL, 0, 0, 0, 0, NULL }
 };
 
-jv_value_t *mcp_dispatch_tool(const char *tool_name, const jv_value_t *args)
+/* 项目加载检查豁免名单：探测/控制类工具，不要求项目已加载。 */
+static const char *k_no_project_check[] = {
+    "vb_read_project_info",
+    "vb_write_status",
+    "vb_write_options",
+    "vb_write_update_all",
+    "vb_write_clear_buffers",
+    NULL
+};
+
+static const tool_entry_t *find_tool(const char *name)
 {
-    if (!tool_name) return make_error(vbmcp_t_utf8(T_ERR_EMPTY_TOOL_NAME));
+    if (!name) return NULL;
     for (int i = 0; g_tools[i].name; i++) {
-        if (vb_streq(tool_name, g_tools[i].name)) {
-            /* 集中项目加载检查：除了探测/控制类工具，其他工具调用前
-             * 必须确保 VB Decompiler 已加载项目。
-             *
-             * SDK 不暴露 "ReloadFile / RefreshEngine / ReInitPlugin" 等 API，
-             * 触发 VBDecompilerPluginLoad 重入（重新赋值 g_engine）的**唯一**
-             * 路径是用户**点 Plugins 菜单项**（VB Decompiler 私有菜单系统，
-             * vbmcp 无法模拟）。
-             *
-             * "Plugins 菜单 → 配置窗口 → 点确定" 这个完整流程中：
-             *   - 点菜单项 → PluginLoad 重入（g_engine 重新有效）
-             *   - 点确定 → 只启停服务器（不动 g_engine）
-             *
-             * 返回错误 + 解决方法，让用户立刻知道怎么恢复，而不是面对一片
-             * 空数据困惑。 */
-            static const char *k_no_project_check[] = {
-                "vb_get_project_info",   /* 本身就在探测项目状态 */
-                "vb_set_status",
-                "vb_set_options",
-                "vb_update_all",
-                "vb_clear_buffers",
-                NULL
-            };
-            int needs_check = 1;
-            for (int j = 0; k_no_project_check[j]; j++) {
-                if (vb_streq(tool_name, k_no_project_check[j])) {
-                    needs_check = 0;
-                    break;
-                }
-            }
-            if (needs_check && !vb_is_project_loaded()) {
-                char buf[512];
-                snprintf(buf, sizeof(buf),
-                    vbmcp_t_utf8(T_ERR_PROJECT_NOT_LOADED),
-                    tool_name);
-                return make_error(buf);
-            }
-            return g_tools[i].impl(args);
-        }
+        if (vb_streq(name, g_tools[i].name)) return &g_tools[i];
     }
-    char buf[128];
-    snprintf(buf, sizeof(buf), vbmcp_t_utf8(T_ERR_UNKNOWN_TOOL), tool_name);
-    return make_error(buf);
+    return NULL;
 }
 
-/* ============================================================
- * tools/list schema（这是 MCP 协议要求客户端获取的工具元数据）
- * ============================================================ */
 
-/* append_schema_tool —— 写单个 tool 的完整 JSON Schema + annotations。
- *
- * properties_json: 必须是合法的 JSON 对象字符串（"{}" 或 "{...}"），不带外层 {}。
- *                  内部会原样拼接进 inputSchema.properties。
- *
- * annotations (MCP 2025-03 规范):
- *   - readOnlyHint:    true  = 工具不会修改任何状态
- *   - destructiveHint: true  = 工具执行不可逆修改（默认；只在 readOnlyHint=false 时相关）
- *   - idempotentHint:  true  = 同名同参多次调用效果一致
- *   - openWorldHint:   true  = 工具与"外部实体"交互（vbmcp 全是本地，无）
- *
- * name/description 走 sb_append_json_string()，因为部分描述（如 vb_set_options
- * 里的 "Parse stack parameters"）内嵌 ASCII 双引号，必须 JSON 转义；
- * 控制字符、UTF-8 高位字符同样由 sb_append_json_string 正确处理。 */
-static void append_schema_tool(strbuf_t *out,
-                               const char *name, const char *desc,
-                               const char *properties_json,
-                               int read_only, int destructive,
-                               int idempotent, int open_world)
+int mcp_tool_is_write(const char *tool_name)
 {
-    sb_append_char(out, '{');
-    sb_append(out, "\"name\":", 7);
-    sb_append_json_string(out, name);
-    sb_append(out, ",\"description\":", 15);
-    sb_append_json_string(out, desc);
-    sb_append_str(out, ",\"inputSchema\":{\"type\":\"object\",\"properties\":");
-    sb_append_str(out, properties_json);
-    sb_append_str(out, ",\"additionalProperties\":false}");
-    /* annotations —— 提示客户端（模型/UI）工具的副作用 */
-    sb_append_str(out, ",\"annotations\":{");
-    sb_append_str(out, "\"readOnlyHint\":");     sb_append_str(out, read_only   ? "true" : "false");
-    sb_append_str(out, ",\"destructiveHint\":"); sb_append_str(out, destructive ? "true" : "false");
-    sb_append_str(out, ",\"idempotentHint\":");  sb_append_str(out, idempotent  ? "true" : "false");
-    sb_append_str(out, ",\"openWorldHint\":");   sb_append_str(out, open_world  ? "true" : "false");
-    sb_append_char(out, '}');
-    sb_append_char(out, '}');
+    const tool_entry_t *e = find_tool(tool_name);
+    return e ? e->is_write : 0;
 }
 
-/* ============================================================
- * properties 片段构造（description 按当前语言，UTF-8）
- *
- * append_schema_tool() 把 properties_json 原样拼进 inputSchema.properties
- * （不做 JSON 转义），因此这些函数输出的片段必须是合法 JSON；description
- * 文案经 vbmcp_t_utf8() 取当前语言的 UTF-8 串（与 application/json 一致），
- * 且自身不含 JSON 需转义的字符（引号/反斜杠/控制字符）。
- *
- * 线程安全：tools/list 与工具调用都在 VB Decompiler 主线程
- * （WSAAsyncSelect 消息循环）内同步完成，静态缓冲无并发写问题。
- * ============================================================ */
-
-/* 分页参数片段（不含外层 {}，由调用方包 {}）。limit 默认 100，最大 10000。 */
-static const char *json_limit_offset(void)
-{
-    static char buf[512];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":10000,\"default\":100,\"description\":\"%s\"},"
-        "\"offset\":{\"type\":\"integer\",\"minimum\":0,\"default\":0,\"description\":\"%s\"}",
-        vbmcp_t_utf8(T_DESC_LIMIT), vbmcp_t_utf8(T_DESC_OFFSET));
-    return buf;
-}
-
-/* "{" + json_limit_offset() + "}"。内层写另一静态缓冲，无别名覆盖。 */
-static const char *json_paging(void)
-{
-    static char buf[512];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "{%s}", json_limit_offset());
-    return buf;
-}
-
-/* module_index + 分页（vb_list_module_functions 用）。 */
-static const char *json_module_index_paging(void)
-{
-    static char buf[640];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "{\"module_index\":{\"type\":\"integer\",\"minimum\":0},%s}",
-        json_limit_offset());
-    return buf;
-}
-
-/* form_index 参数（vb_get_form 用）。 */
-static const char *json_form_index(void)
-{
-    static char buf[256];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "{\"form_index\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"%s\"}}",
-        vbmcp_t_utf8(T_DESC_PARAM_FORM_INDEX));
-    return buf;
-}
-
-/* project_text 参数（vb_set_project_text 用）。 */
-static const char *json_project_text_param(void)
-{
-    static char buf[256];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "{\"project_text\":{\"type\":\"string\",\"description\":\"%s\"}}",
-        vbmcp_t_utf8(T_DESC_PARAM_PROJECT_TEXT));
-    return buf;
-}
-
-/* line 参数（vb_goto_line 用）。 */
-static const char *json_line_param(void)
-{
-    static char buf[256];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "{\"line\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"%s\"}}",
-        vbmcp_t_utf8(T_DESC_PARAM_LINE));
-    return buf;
-}
-
-/* stack_check / analyzer_check 参数（vb_set_options 用）。 */
-static const char *json_options_params(void)
-{
-    static char buf[512];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
-        "{\"stack_check\":{\"type\":\"string\",\"enum\":[\"0\",\"1\"],\"description\":\"%s\"},"
-        "\"analyzer_check\":{\"type\":\"string\",\"enum\":[\"0\",\"1\"],\"description\":\"%s\"}}",
-        vbmcp_t_utf8(T_DESC_PARAM_ONOFF), vbmcp_t_utf8(T_DESC_PARAM_ONOFF));
-    return buf;
-}
-
-/* 把所有本地工具逐项追加到 strbuf（不带外层 {"tools":[...]} 包装）。
- * 用于 mcp_build_tools_schema()（本地单独 tools/list）。
- *
- * 命名规范：所有工具统一加 "vb_" 前缀，避免与其他 MCP 服务器（iida 等）
- * 的同名工具冲突（推荐见 MCP Best Practices）。
- *
- * annotations 规则（MCP 2025-03）：
- *   readOnly=true:    get_*, list_*
- *   destructive=true: 不可逆修改（set_project/set_form/set_module/set_function/set_sub_main/clear_buffers）
- *   idempotent=true:  全部（同名同参多次调用结果一致）
- *   openWorld=false:  全部（vbmcp 是本地插件，无外部交互） */
-static void append_local_tools(strbuf_t *b)
-{
-    append_schema_tool(b, "vb_get_project_info",
-        vbmcp_t_utf8(T_DESC_PROJECT_INFO),
-        "{}", 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_project_text",
-        vbmcp_t_utf8(T_DESC_PROJECT_TEXT),
-        "{}", 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_project_text",
-        vbmcp_t_utf8(T_DESC_SET_PROJECT_TEXT),
-        json_project_text_param(),
-        0, 1, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_clear_buffers",
-        vbmcp_t_utf8(T_DESC_CLEAR_BUFFERS),
-        "{}", 0, 1, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_list_forms",
-        vbmcp_t_utf8(T_DESC_LIST_FORMS),
-        json_paging(), 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_form",
-        vbmcp_t_utf8(T_DESC_GET_FORM),
-        json_form_index(),
-        1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_form",
-        vbmcp_t_utf8(T_DESC_SET_FORM),
-        "{\"form_index\":{\"type\":\"integer\",\"minimum\":0},\"form_text\":{\"type\":\"string\"}}",
-        0, 1, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_rename_form",
-        vbmcp_t_utf8(T_DESC_RENAME_FORM),
-        "{\"form_index\":{\"type\":\"integer\",\"minimum\":0},\"new_name\":{\"type\":\"string\",\"minLength\":1}}",
-        0, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_list_modules",
-        vbmcp_t_utf8(T_DESC_LIST_MODULES),
-        json_paging(), 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_module",
-        vbmcp_t_utf8(T_DESC_GET_MODULE),
-        "{\"module_index\":{\"type\":\"integer\",\"minimum\":0}}",
-        1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_module",
-        vbmcp_t_utf8(T_DESC_SET_MODULE),
-        "{\"module_index\":{\"type\":\"integer\",\"minimum\":0},\"declarations\":{\"type\":\"string\"}}",
-        0, 1, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_list_module_functions",
-        vbmcp_t_utf8(T_DESC_LIST_MODULE_FUNCTIONS),
-        json_module_index_paging(),
-        1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_function",
-        vbmcp_t_utf8(T_DESC_GET_FUNCTION),
-        "{\"module_index\":{\"type\":\"integer\",\"minimum\":0},\"function_index\":{\"type\":\"integer\",\"minimum\":0}}",
-        1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_function",
-        vbmcp_t_utf8(T_DESC_SET_FUNCTION),
-        "{\"module_index\":{\"type\":\"integer\",\"minimum\":0},\"function_index\":{\"type\":\"integer\",\"minimum\":0},\"code\":{\"type\":\"string\"}}",
-        0, 1, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_rename_function",
-        vbmcp_t_utf8(T_DESC_RENAME_FUNCTION),
-        "{\"module_index\":{\"type\":\"integer\",\"minimum\":0},\"function_index\":{\"type\":\"integer\",\"minimum\":0},\"new_name\":{\"type\":\"string\",\"minLength\":1}}",
-        0, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_sub_main",
-        vbmcp_t_utf8(T_DESC_GET_SUB_MAIN),
-        "{}", 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_sub_main",
-        vbmcp_t_utf8(T_DESC_SET_SUB_MAIN),
-        "{\"code\":{\"type\":\"string\"}}",
-        0, 1, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_active_text",
-        vbmcp_t_utf8(T_DESC_GET_ACTIVE_TEXT),
-        "{}", 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_active_text",
-        vbmcp_t_utf8(T_DESC_SET_ACTIVE_TEXT),
-        "{\"text\":{\"type\":\"string\"}}",
-        0, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_active_disasm_text",
-        vbmcp_t_utf8(T_DESC_GET_ACTIVE_DISASM_TEXT),
-        "{}", 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_active_disasm_text",
-        vbmcp_t_utf8(T_DESC_SET_ACTIVE_DISASM_TEXT),
-        "{\"text\":{\"type\":\"string\"}}",
-        0, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_goto_line",
-        vbmcp_t_utf8(T_DESC_GOTO_LINE),
-        json_line_param(),
-        0, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_get_active_coords",
-        vbmcp_t_utf8(T_DESC_GET_ACTIVE_COORDS),
-        "{}", 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_status",
-        vbmcp_t_utf8(T_DESC_SET_STATUS),
-        "{\"text\":{\"type\":\"string\"}}",
-        0, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_set_options",
-        vbmcp_t_utf8(T_DESC_SET_OPTIONS),
-        json_options_params(),
-        0, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_list_frx_icons",
-        vbmcp_t_utf8(T_DESC_LIST_FRX_ICONS),
-        json_paging(), 1, 0, 1, 0);
-    sb_append_char(b, ',');
-
-    append_schema_tool(b, "vb_update_all",
-        vbmcp_t_utf8(T_DESC_UPDATE_ALL),
-        "{}", 0, 0, 1, 0);
-}
-
-/* 仅本地工具的完整 schema（含 {"tools":[...]} 包装）。
- * 保留旧接口名以兼容潜在外部调用方；新代码应优先用 mcp_build_local_tools_array()。 */
-char *mcp_build_tools_schema(void)
-{
-    strbuf_t b;
-    sb_init(&b);
-    sb_append_str(&b, "{\"tools\":[");
-    append_local_tools(&b);
-    sb_append_str(&b, "]}");
-    sb_finalize(&b);
-    return b.buf;
-}
-
-/* 仅本地工具的 JSON 数组字符串（"[{...},{...}]"，new alloc）。
- * mcp_rpc 层会把它与上游工具数组合并形成完整 tools/list 响应。
- * 末尾不带 ','，适合直接拼接上游数组。 */
-char *mcp_build_local_tools_array(void)
-{
-    strbuf_t b;
-    sb_init(&b);
-    sb_append_char(&b, '[');
-    append_local_tools(&b);
-    sb_append_char(&b, ']');
-    sb_finalize(&b);
-    return b.buf;
-}
-
-/* 本地工具总数（数 g_tools sentinel-终止数组）。用于 /health 端点。 */
-int mcp_local_tool_count(void)
+int mcp_local_tool_count(int allow_write)
 {
     int n = 0;
-    while (g_tools[n].name) n++;
+    for (int i = 0; g_tools[i].name; i++) {
+        if (g_tools[i].is_write && !allow_write) continue;
+        n++;
+    }
     return n;
+}
+
+/* 分发工具调用。
+ *   args          已解析的 arguments 对象（可为 NULL）
+ *   allow_write   是否允许写入（只读模式下拒绝 vb_write_*）
+ *   out_error_code 返回错误分类（VBMCP_ERR_*）；成功为 VBMCP_ERR_OK
+ * 返回工具结果 JSON 字符串（new alloc，调用方 vbmcp_free）。 */
+char *mcp_dispatch_tool(const char *tool_name, yyjson_val *args,
+                        int allow_write, int *out_error_code)
+{
+    g_tool_err = VBMCP_ERR_OK;
+    if (out_error_code) *out_error_code = VBMCP_ERR_OK;
+
+    if (!tool_name || !*tool_name) {
+        char *r = err_json(VBMCP_ERR_INVALID_PARAMS, _("Tool name is empty"));
+        if (out_error_code) *out_error_code = g_tool_err;
+        return r;
+    }
+
+    const tool_entry_t *e = find_tool(tool_name);
+    if (!e) {
+        char *r = err_json(VBMCP_ERR_INVALID_PARAMS, _F("Unknown tool: %s", tool_name));
+        if (out_error_code) *out_error_code = g_tool_err;
+        return r;
+    }
+
+    /* 防御兜底：只读模式下即便客户端绕过 listTools 强行调用 vb_write_*，
+     * 也在此二次校验权限，直接返回 MCP 权限错误，不执行业务。 */
+    if (e->is_write && !allow_write) {
+        char *r = err_json(VBMCP_ERR_PERMISSION, _("Write access is disabled. All vb_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings."));
+        if (out_error_code) *out_error_code = g_tool_err;
+        return r;
+    }
+
+    /* 集中项目加载检查 */
+    int needs_check = 1;
+    for (int j = 0; k_no_project_check[j]; j++) {
+        if (vb_streq(tool_name, k_no_project_check[j])) { needs_check = 0; break; }
+    }
+    if (needs_check && !vb_is_project_loaded()) {
+        char *r = err_json(VBMCP_ERR_BUSINESS,
+            _F("Project not loaded. The VB SDK provides no ReloadFile/Refresh API, so vbmcp cannot re-initialize the engine from the DLL side. Please open the vbmcp settings window from the Plugins menu in the VB Decompiler main window and click OK (this triggers a VBDecompilerPluginLoad re-entry). Tool called: %s",
+               tool_name));
+        if (out_error_code) *out_error_code = g_tool_err;
+        return r;
+    }
+
+    char *payload = e->impl(args);
+    if (out_error_code) *out_error_code = g_tool_err;
+    return payload;
+}
+
+/* ============================================================
+ * tools/list schema 构造（全部 yyjson）
+ *
+ * annotations (MCP 2025-03 规范):
+ *   readOnlyHint / destructiveHint / idempotentHint / openWorldHint
+ * vbmcp 全部为本地工具，openWorldHint 恒为 false。
+ * ============================================================ */
+
+static void param_int(yyjson_mut_doc *doc, yyjson_mut_val *props, const char *name,
+                      long long min, long long max, long long def, const char *desc)
+{
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, o, "type", "integer");
+    if (min >= 0) yyjson_mut_obj_add_int(doc, o, "minimum", min);
+    if (max > 0)  yyjson_mut_obj_add_int(doc, o, "maximum", max);
+    if (def >= 0) yyjson_mut_obj_add_int(doc, o, "default", def);
+    if (desc)     yyjson_mut_obj_add_strcpy(doc, o, "description", desc);
+    yyjson_mut_obj_add_val(doc, props, name, o);
+}
+
+static void param_str(yyjson_mut_doc *doc, yyjson_mut_val *props, const char *name,
+                      const char *desc)
+{
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, o, "type", "string");
+    if (desc) yyjson_mut_obj_add_strcpy(doc, o, "description", desc);
+    yyjson_mut_obj_add_val(doc, props, name, o);
+}
+
+static void param_onoff(yyjson_mut_doc *doc, yyjson_mut_val *props, const char *name)
+{
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, o, "type", "string");
+    yyjson_mut_val *en = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_strcpy(doc, en, "0");
+    yyjson_mut_arr_add_strcpy(doc, en, "1");
+    yyjson_mut_obj_add_val(doc, o, "enum", en);
+    yyjson_mut_obj_add_strcpy(doc, o, "description", _("\\\"0\\\"=off \\\"1\\\"=on"));
+    yyjson_mut_obj_add_val(doc, props, name, o);
+}
+
+static void add_params(yyjson_mut_doc *doc, yyjson_mut_val *props, unsigned flags)
+{
+    if (flags & P_PAGING) {
+        param_int(doc, props, "limit",  1, 10000, 100, _("Maximum number of items to return"));
+        param_int(doc, props, "offset", 0, 0,      0, _("Start offset"));
+    }
+    if (flags & P_FORM_INDEX)
+        param_int(doc, props, "form_index", 0, 0, -1, _("Form index (0-based)"));
+    if (flags & P_PROJECT_TEXT)
+        param_str(doc, props, "project_text", _("Full replacement project text (required)"));
+    if (flags & P_MODULE_INDEX)
+        param_int(doc, props, "module_index", 0, 0, -1, NULL);
+    if (flags & P_FUNCTION_INDEX)
+        param_int(doc, props, "function_index", 0, 0, -1, NULL);
+    if (flags & P_FORM_TEXT)
+        param_str(doc, props, "form_text", NULL);
+    if (flags & P_NEW_NAME)
+        param_str(doc, props, "new_name", NULL);
+    if (flags & P_TEXT)
+        param_str(doc, props, "text", NULL);
+    if (flags & P_LINE)
+        param_int(doc, props, "line", 0, 0, -1, _("Target line number (0-based)"));
+    if (flags & P_CODE)
+        param_str(doc, props, "code", NULL);
+    if (flags & P_DECLARATIONS)
+        param_str(doc, props, "declarations", NULL);
+    if (flags & P_STRING_REFS)
+        param_str(doc, props, "string_references", NULL);
+    if (flags & P_OPTIONS) {
+        param_onoff(doc, props, "stack_check");
+        param_onoff(doc, props, "analyzer_check");
+    }
+}
+
+static void build_one_tool(yyjson_mut_doc *doc, yyjson_mut_val *arr, const tool_entry_t *e)
+{
+    yyjson_mut_val *t = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, t, "name", e->name);
+    /* desc == NULL 表示暂无描述（如 module_string_references）：用工具名兜底。
+     * 工具名是协议标识符，不翻译；描述走 i18n（MCP 报文必须是 UTF-8）。 */
+    yyjson_mut_obj_add_strcpy(doc, t, "description",
+        (e->desc && *e->desc) ? _(e->desc) : e->name);
+
+    yyjson_mut_val *schema = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, schema, "type", "object");
+    yyjson_mut_val *props = yyjson_mut_obj(doc);
+    add_params(doc, props, e->params);
+    yyjson_mut_obj_add_val(doc, schema, "properties", props);
+    yyjson_mut_obj_add_bool(doc, schema, "additionalProperties", 0);
+    yyjson_mut_obj_add_val(doc, t, "inputSchema", schema);
+
+    yyjson_mut_val *ann = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, ann, "readOnlyHint", !e->is_write);
+    yyjson_mut_obj_add_bool(doc, ann, "destructiveHint", e->destructive);
+    yyjson_mut_obj_add_bool(doc, ann, "idempotentHint", e->idempotent);
+    yyjson_mut_obj_add_bool(doc, ann, "openWorldHint", 0);
+    yyjson_mut_obj_add_val(doc, t, "annotations", ann);
+
+    yyjson_mut_arr_append(arr, t);
+}
+
+/* 把当前权限下可见的工具追加到调用方提供的数组（不创建新 doc）。
+ * allow_write=0 时只追加 vb_read_*，=1 时追加全部。 */
+void mcp_build_tools_into(yyjson_mut_doc *doc, yyjson_mut_val *arr, int allow_write)
+{
+    if (!doc || !arr) return;
+    for (int i = 0; g_tools[i].name; i++) {
+        if (g_tools[i].is_write && !allow_write) continue;
+        build_one_tool(doc, arr, &g_tools[i]);
+    }
+}
+
+/* 独立返回 {"tools":[...]} 字符串（new alloc）。 */
+char *mcp_build_tools_schema(int allow_write)
+{
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return vbmcp_strdup("{\"tools\":[]}");
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "tools", arr);
+    mcp_build_tools_into(doc, arr, allow_write);
+    return doc_to_string(doc);
 }

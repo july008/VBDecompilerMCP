@@ -1,13 +1,15 @@
-﻿/*
-* config.c - 插件配置读写（Windows 注册表）
+/*
+* config.cpp - 插件配置读写（Windows 注册表）
 *
 * 存储位置（与 VB Decompiler 自身的 Options 注册表项同级、互不干扰）：
 *   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
 *
 * 值：
-*   Port         REG_DWORD 1..65535             (默认 3023)
-*   BindAddress  REG_SZ                        (默认 127.0.0.1)
-*
+ *   Port         REG_DWORD 1..65535             (默认 3023)
+ *   BindAddress  REG_SZ                         (默认 127.0.0.1)
+ *   AllowWrite   REG_DWORD 0/1                  (默认 0 = 只读模式)
+ *   CorsOrigins  REG_SZ 逗号分隔可信 origin 列表 (默认空 = 不返回任何 CORS 头)
+ *
 *   EnableMcp    REG_SZ  （**历史遗留字段**，新版不再读写 —— 服务启用状态
 *                       由用户在 Plugins 设置窗体里点"确定"即时生效，
 *                       每次 VB Decompiler 启动默认禁用。旧值保留在注册表
@@ -15,7 +17,7 @@
 *
 * UI 语言通过单独的子键读取（VB Decompiler 自己写入）：
 *   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\Options\CustomLanguage
-* 详见 lang.c。
+* 详见 lang.cpp。
 *
 * 设计原则：
 *   - 不存在 / 字段缺失时返回默认值，不抛错。
@@ -31,6 +33,8 @@
 #define VBMCP_VAL_ENABLE  "EnableMcp"
 #define VBMCP_VAL_PORT    "Port"
 #define VBMCP_VAL_BIND    "BindAddress"
+#define VBMCP_VAL_ALLOW_WRITE "AllowWrite"
+#define VBMCP_VAL_CORS    "CorsOrigins"
 
 /* 读 REG_SZ 到用户缓冲（不写默认值；仅在类型不符或失败时清空）。 */
 static int reg_read_sz(HKEY hKey, const char *value, char *out, size_t cap)
@@ -91,9 +95,10 @@ static HKEY open_key(BOOL create)
     return hKey;
 }
 
-void vbmcp_config_load(int *port, char *bind_out, size_t bind_cap)
+void vbmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_write)
 {
     if (port)   *port   = VBMCP_DEFAULT_PORT;
+    if (allow_write) *allow_write = VBMCP_DEFAULT_ALLOW_WRITE;
     if (bind_out && bind_cap) {
         _snprintf_s(bind_out, bind_cap, _TRUNCATE, "%s", VBMCP_DEFAULT_BIND);
     }
@@ -101,7 +106,8 @@ void vbmcp_config_load(int *port, char *bind_out, size_t bind_cap)
     HKEY hKey = open_key(FALSE);
     if (!hKey) {
         vbmcp_config_save(port   ? *port   : VBMCP_DEFAULT_PORT,
-                          (bind_out && bind_out[0]) ? bind_out : VBMCP_DEFAULT_BIND);
+                          (bind_out && bind_out[0]) ? bind_out : VBMCP_DEFAULT_BIND,
+                          allow_write ? *allow_write : VBMCP_DEFAULT_ALLOW_WRITE);
         return;
     }
 
@@ -122,17 +128,23 @@ void vbmcp_config_load(int *port, char *bind_out, size_t bind_cap)
         need_rewrite = TRUE;
     }
 
+    /* AllowWrite：缺失时用默认（只读）；不触发 rewrite，避免老用户被强制写入新键 */
+    if (reg_read_dw(hKey, VBMCP_VAL_ALLOW_WRITE, &dw) && allow_write) {
+        *allow_write = (dw != 0) ? 1 : 0;
+    }
+
     RegCloseKey(hKey);
 
     /* 有任何缺失 / 越界 / 不可识别值 → 把当前（已用默认值填补的）结果写回注册表 */
     if (need_rewrite) {
         vbmcp_config_save(port   ? *port   : VBMCP_DEFAULT_PORT,
-                          (bind_out && bind_out[0]) ? bind_out : VBMCP_DEFAULT_BIND);
+                          (bind_out && bind_out[0]) ? bind_out : VBMCP_DEFAULT_BIND,
+                          allow_write ? *allow_write : VBMCP_DEFAULT_ALLOW_WRITE);
     }
 
 }
 
-void vbmcp_config_save(int port, const char *bind)
+void vbmcp_config_save(int port, const char *bind, int allow_write)
 {
    
     HKEY hKey = open_key(TRUE);
@@ -144,8 +156,21 @@ void vbmcp_config_save(int port, const char *bind)
     /* 不写 EnableMcp 字段 —— 见上方说明 */
     reg_write_dw(hKey, VBMCP_VAL_PORT, (DWORD)(port > 0 ? port : VBMCP_DEFAULT_PORT));
     reg_write_sz(hKey, VBMCP_VAL_BIND, (bind && *bind) ? bind : VBMCP_DEFAULT_BIND);
+    reg_write_dw(hKey, VBMCP_VAL_ALLOW_WRITE, allow_write ? 1u : 0u);
 
     RegCloseKey(hKey);
-    vbmcp_log("config saved: port=%d, bind=%s",
-              port, bind ? bind : VBMCP_DEFAULT_BIND);
+    vbmcp_log("config saved: port=%d, bind=%s, allow_write=%d",
+              port, bind ? bind : VBMCP_DEFAULT_BIND, allow_write ? 1 : 0);
+}
+
+/* 可信 CORS origin 列表（逗号分隔）。空串 = 未配置。允许 "*" 会被忽略。 */
+void vbmcp_config_get_cors_origins(char *out, size_t cap)
+{
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+
+    HKEY hKey = open_key(FALSE);
+    if (!hKey) return;
+    reg_read_sz(hKey, VBMCP_VAL_CORS, out, cap);
+    RegCloseKey(hKey);
 }

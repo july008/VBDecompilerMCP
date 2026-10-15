@@ -1,5 +1,5 @@
-﻿/*
- * vbdec_sdk.c - VB Decompiler Plugin SDK 封装（C语言版本）
+/*
+ * vbdec_sdk.cpp - VB Decompiler Plugin SDK 封装（C++ 版）
  *
  * VB Decompiler 的 Callback Engine 函数原型（与官方VC SDK一致）：
  *     void* __stdcall Engine(int vlType, int vlNumber, int vlFnNumber, void *vlNewValue);
@@ -9,8 +9,9 @@
  *
  * 线程安全：VB Decompiler 是 GUI 单线程应用，Callback Engine 只能从
  *           主线程（VB Decompiler 消息循环所在线程）调用。
- *           因此 vb_get_value / vb_set_value 不应该在工作线程直接调用；
- *           当前 mcp_rpc 实现通过 PostMessage 把工具调用投递到主线程执行。
+ *           因此 vb_get_value / vb_set_value 只能在 UI 主线程调用 ——
+ *           mcp_http.cpp 的网络线程通过 UiTask 队列把所有工具调用投递到主线程，
+ *           后台线程绝不直接调用本文件里的任何函数。
  */
 #include "vbmcp.h"
 #include <strsafe.h>
@@ -90,11 +91,30 @@ static char *engine_get_to_ansi(int vlType, int vlNumber, int vlFnNumber)
  *
  * 引擎在 Set 路径上**存储指针不拷贝**（demo 全部 leak 以避免 use-after-free）。
  * 我们也传 ANSI 透传 + 故意 leak（不用 vbmcp_alloc，否则日后有人误调 vbmcp_free）。
- * 代价：每次 Set 漏一个小字符串，全天 < 100KB，进程退出时回收。
+ * 代价与风险：每次 Set 漏一份字符串。普通字段（端口/索引/标志）很小，但
+ * **vb_write_project_text 之类工具单次可传 16MB** —— AI 客户端反复写大文件就是几百 MB 的常驻泄漏。
+ * 所以这里累计泄漏量并在跨过阈值时告警，让“隐形泄漏”变成日志里看得见的事实。
  *
  * 不再转 UTF-16：之前转 UTF-16 后引擎读 ANSI 字节序会得到 `H\0e\0...` ，
  * 对 ASCII 表现为"取首字节"或空串，对非 ASCII（含中文）直接乱码。
  */
+/* 已泄漏字节数（到达阈值时告警一次） */
+static std::atomic<size_t> g_set_leak_bytes{ 0 };
+static void note_set_leak(size_t n)
+{
+    static const size_t kWarnAt[] = { 1u << 20, 16u << 20, 64u << 20, 256u << 20 };
+    const size_t total = g_set_leak_bytes.fetch_add(n) + n;
+    for (size_t thr : kWarnAt) {
+        if (total >= thr && total - n < thr) {
+            vbmcp_logf(VBMCP_LOG_WARN,
+                       "engine Set leak reached %.1f MB (engine keeps every pointer; "
+                       "large vb_write_project_text calls are the main contributor)",
+                       (double)total / (1024.0 * 1024.0));
+            break;
+        }
+    }
+}
+
 static void *engine_set_from_ansi(int vlType, int vlNumber, int vlFnNumber, const char *value)
 {
     if (!g_engine) return NULL;
@@ -116,6 +136,7 @@ static void *engine_set_from_ansi(int vlType, int vlNumber, int vlFnNumber, cons
         g_pending_engine = NULL;
         return NULL;
     }
+    note_set_leak(n + 1);
     return r;
     /* 注：故意不 free(buf)。引擎内部存储该指针供后续显示/UpdateAll 使用。 */
 }
@@ -136,7 +157,7 @@ static void *engine_set_from_ansi(int vlType, int vlNumber, int vlFnNumber, cons
  * 修复 "PluginLoad 没重入" 的问题，并且当 g_engine 指向已失效的函数指针
  * （用户切换项目后 engine 被 reset）时直接导致 Access Violation。
  * 现在依赖 "Plugins 菜单 → 配置窗口 → 点确定" 的手动工作流来触发
- * PluginLoad 重入（plugin_main.c::VBDecompilerPluginLoad）。
+ * PluginLoad 重入（plugin_main.cpp::VBDecompilerPluginLoad）。
  *
  * 项目状态探测由调用方通过 vb_is_project_loaded() 显式完成 —— SDK
  * 不暴露 "ReloadFile / RefreshEngine / ReInitPlugin" 这类 API。

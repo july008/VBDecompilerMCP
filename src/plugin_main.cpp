@@ -1,28 +1,18 @@
-﻿#include "vbmcp.h"
-#include "lang.h"
+#include "vbmcp.h"
+#include "i18n.h"
 #include <stdio.h>
 #include <strsafe.h>
 #include <stdarg.h>
 
-/* g_engine 在 vbdec_sdk.c 中定义 */
+/* g_engine 在 vbdec_sdk.cpp 中定义 */
 extern TVBPluginEngine g_engine;
 
 /* PluginName 调用计数：1=首次启动，>=2=每次显示菜单前都再问一次名字 */
 static int g_name_count = 0;
 
-/* PluginLoad 调用计数：1=首次启动，>=2=用户点菜单 */
-static int g_load_count = 0;
-
-/* ============================================================
- * DllMain 调试 trace（用 OutputDebugString 输出，不弹窗，避免 loader lock 死锁）
- * ============================================================ */
-static void vbmcp_trace(const char *title, const char *fmt, ...) {
-    char buf[2048];
-    va_list ap;
-    va_start(ap, fmt);
-    _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
-    va_end(ap);
-}
+/* VB Decompiler 主窗口句柄（vbmcp.h 声明为 extern）。
+ * 在 PluginName / PluginLoad 回调中保存，供 UI 弹窗（授权/告警）作父窗口。 */
+HWND g_main_hwnd = NULL;
 
 /* ============================================================
  * 导出函数（注意 __stdcall 与 extern "C"）
@@ -38,15 +28,19 @@ __declspec(dllexport) void __stdcall VBDecompilerPluginName(
      * → 必须用计数器，只在第一次启动服务器。 */
     g_name_count++;
 
+    /* 尽早保存 VB Decompiler 主窗口句柄（UI 弹窗父窗口） */
+    if (VBDecompilerHWND && IsWindow(VBDecompilerHWND)) g_main_hwnd = VBDecompilerHWND;
+
     if (g_name_count == 1) {
         int port = VBMCP_DEFAULT_PORT;
+        int allow_write = VBMCP_DEFAULT_ALLOW_WRITE;
         char bind_buf[64] = {0};
-        vbmcp_config_load( &port, bind_buf, sizeof(bind_buf));
+        vbmcp_config_load(&port, bind_buf, sizeof(bind_buf), &allow_write);
 
-        g_enabled = 0;   /* 永远默认禁用，由用户主动开启 */
-        g_port    = port;
-        if (g_bindings) vbmcp_free(g_bindings);
-        g_bindings = vbmcp_strdup(bind_buf[0] ? bind_buf : VBMCP_DEFAULT_BIND);
+        g_enabled.store(0);          /* 永远默认禁用，由用户主动开启 */
+        g_port.store(port);
+        g_allow_write.store(allow_write);
+        vbmcp_set_bind_address(bind_buf[0] ? bind_buf : VBMCP_DEFAULT_BIND);
 
         vbmcp_log("first PluginName: server NOT auto-started (user must enable via Plugins dialog)");
     }
@@ -57,8 +51,8 @@ __declspec(dllexport) void __stdcall VBDecompilerPluginName(
     if (!buffer) return;
 
     /* 关键：菜单项文字也是用户可见文本，必须按当前语言切换。 */
-    vbmcp_lang_refresh();
-    strncpy_s(buffer, 100, vbmcp_t(T_PLUGIN_NAME), _TRUNCATE);
+    I18n_Refresh();
+    strncpy_s(buffer, 100, _A("VB Decompiler MCP Server"), _TRUNCATE);
 }
 
 __declspec(dllexport) void __stdcall VBDecompilerPluginAuthor(
@@ -67,23 +61,22 @@ __declspec(dllexport) void __stdcall VBDecompilerPluginAuthor(
 {
     (void)VBDecompilerHWND; (void)RichTextBoxHWND; (void)reserved;
     if (!buffer) return;
-    vbmcp_lang_refresh();
-    strncpy_s(buffer, 100, vbmcp_t(T_PLUGIN_AUTHOR), _TRUNCATE);
+    I18n_Refresh();
+    strncpy_s(buffer, 100, _A("vbmcp project, admin@vb-decompiler.org"), _TRUNCATE);
 }
 
 __declspec(dllexport) void __stdcall VBDecompilerPluginLoad(
     HWND VBDecompilerHWND, HWND RichTextBoxHWND,
     char *buffer, void *plugin_engine)
 {
-    /* 必须最先 ++g_load_count，否则后面的 if (g_load_count == 1) 永远不命中 */
-    g_load_count++;
-
     (void)RichTextBoxHWND;
     (void)buffer;
 
+    /* 保存主窗口句柄（供授权/告警弹窗作父窗口） */
+    if (VBDecompilerHWND && IsWindow(VBDecompilerHWND)) g_main_hwnd = VBDecompilerHWND;
 
     /* 0) 读注册表 CustomLanguage，决定后续所有 UI 文本语言 */
-    vbmcp_lang_refresh();
+    I18n_Refresh();
 
     /* 1) 初始化引擎（用于访问 VB Decompiler 内部）。
      * plugin_engine 为 NULL 时也允许继续（启动那次可能还没建引擎），
@@ -97,13 +90,14 @@ __declspec(dllexport) void __stdcall VBDecompilerPluginLoad(
     /* 2) 加载配置：默认 → 注册表（缺失字段保留默认） */
     {
         int port = VBMCP_DEFAULT_PORT;
+        int allow_write = VBMCP_DEFAULT_ALLOW_WRITE;
         char bind_buf[64] = {0};
-        vbmcp_config_load( &port, bind_buf, sizeof(bind_buf));
+        vbmcp_config_load(&port, bind_buf, sizeof(bind_buf), &allow_write);
 
         /* 写回全局 */
-        g_port = port;
-        if (g_bindings) vbmcp_free(g_bindings);
-        g_bindings = vbmcp_strdup(bind_buf[0] ? bind_buf : VBMCP_DEFAULT_BIND);
+        g_port.store(port);
+        g_allow_write.store(allow_write);
+        vbmcp_set_bind_address(bind_buf[0] ? bind_buf : VBMCP_DEFAULT_BIND);
     }
 
     /* 4) 任何 PluginLoad 调用都弹设置窗体——兼作 MCP 服务器状态显示面板，
@@ -128,12 +122,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
     case DLL_PROCESS_ATTACH:
         g_hInstance = hModule;
         DisableThreadLibraryCalls(hModule);
-
         break;
     case DLL_PROCESS_DETACH:
-        vbmcp_server_stop();
-        vbmcp_options_dialog_cleanup();   /* 释放设置窗体的字体（GDI对象） */
-        if (g_bindings) { vbmcp_free(g_bindings); g_bindings = NULL; }
+        /* 进程卸载：只置停机标志，绝不在loader lock 内 join 线程。
+         * 进程即将退出，socket / 任务队列由系统整体回收。
+         * i18n：先关闭查表（其它线程的 _() 立即返回 msgid），再释放
+         * 哈希表内 strdup 的字符串，避免 DLL 长期重载的泄漏。
+         * UI：释放设置窗体的字体/画刷 GDI 对象（否则每次重载都泄漏）。 */
+        vbmcp_server_signal_stop();
+        I18n_PrepareShutdown();
+        vbmcp_options_dialog_cleanup();
         break;
     }
     return TRUE;

@@ -9,7 +9,7 @@ set "PROJECT_DIR=%~dp0"
 set "SOLUTION=%PROJECT_DIR%vbmcp.sln"
 
 REM VB Decompiler 安装目录（安装位置不同时请修改）
-set "VBDEC_DIR=C:\Program Files\VB Decompiler"
+set "VBDEC_DIR=E:\Ollydbg\VB Decompiler Pro v11.5"
 set "PLUGIN_DIR=%VBDEC_DIR%\Plugins"
 
 set "CONFIG=Release"
@@ -54,21 +54,35 @@ if not exist "%SRC_DLL%" (
     exit /b 1
 )
 echo Built: %SRC_DLL%
+copy /Y "%SRC_DLL%" "%PLUGIN_DIR%\"
 echo.
 
 echo.
 echo [2/2] Usage:
-echo    POST  http://127.0.0.1:3023/   JSON-RPC 2.0
-echo    GET   http://127.0.0.1:3023/health
+echo    POST   http://127.0.0.1:3023/mcp   JSON-RPC 2.0 (MCP Streamable HTTP)
+echo    GET    http://127.0.0.1:3023/mcp   SSE stream (Accept: text/event-stream)
+echo    DELETE http://127.0.0.1:3023/mcp   terminate session
+echo    GET    http://127.0.0.1:3023/health
+echo.
+echo  Security model:
+echo    - listens on 127.0.0.1 only (LAN exposure is opt-in + high risk warning)
+echo    - read-only by default; vb_write_* need "Allow MCP clients to write"
+echo    - first tools/call of a session asks for user confirmation
 echo.
 echo  Configure via Settings dialog (Plugins -^> VB Decompiler MCP Server)
 echo  or registry key:
 echo    HKCU\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
 echo      Port          REG_DWORD
 echo      BindAddress   REG_SZ
+echo      AllowWrite    REG_DWORD
+echo      CorsOrigins   REG_SZ
 echo.
 echo  Debug log (optional):
-echo    set VBMCP_DEBUG_LOG=1   (write to %%TEMP%%\vbmcp.log)
+echo    set VBMCP_DEBUG_LOG=1           (write to %%TEMP%%\vbmcp.log)
+echo    set VBMCP_LOG_LEVEL=3           (0=ERROR 1=WARN 2=INFO 3=DEBUG)
+echo    set VBMCP_TASK_TIMEOUT_MS=30000 (per MCP task timeout)
+echo.
+echo  Docs: README.md / SECURITY.md / docs\DEVELOPMENT.md / docs\REFACTOR_PROGRESS.md
 echo.
 
 endlocal

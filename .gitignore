@@ -16,5 +16,9 @@ Win32/
 tools/**/Debug/
 tools/**/Release/
 
+# Python 缓存
+__pycache__/
+*.pyc
+
 # i18n 提取脚本的中间产物（语言包本身要提交）
 lang_res/untranslated*.txt

@@ -3,51 +3,81 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-C 语言实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [MCP（Model Context Protocol）](https://modelcontextprotocol.io) 服务器运行，使 AI 客户端能够通过 JSON-RPC 2.0 接口读取、修改由 VB Decompiler 反编译生成的代码与内部数据结构。
+C++17 实现的 [VB Decompiler](https://www.vb-decompiler.org) 插件，作为 [MCP（Model Context Protocol）](https://modelcontextprotocol.io) 服务器运行，使 AI 客户端能够通过 **Streamable HTTP（SSE）** + JSON-RPC 2.0 接口读取、修改由 VB Decompiler 反编译生成的代码与内部数据结构。
 
 <img src="pic/pic2.png" width="350" alt="截图">
+
 ## 特性
 
-- **27 个 MCP 工具**：覆盖项目结构（Forms、Modules、Functions）、代码读写、元数据查询；`list_*` 工具支持 `limit`/`offset` 分页。
-- **中英双语界面**：菜单、设置窗体、AI 客户端接入向导、帮助文本，以及 MCP `tools/list` 工具描述与工具错误消息，均跟随 VB Decompiler 主程序语言（注册表 `CustomLanguage` = `ChineseSimplified` → 简体中文，其他/缺失 → 英文）。
-- **纯 C 实现**：单线程事件驱动 + Winsock，无 C++/STL/RapidJSON 依赖。
-- **零第三方库**：自实现极简 JSON 解析器、动态字符串缓冲、HTTP 服务器。
-- **MCP 协议兼容**：Streamable HTTP + JSON-RPC 2.0 + SSE 占位；协议版本 2025-03-26（兼容 2024-11-05）。
+- **MCP Streamable HTTP 传输**：客户端 `POST` 发送请求，服务端通过 **SSE 长连接**推送消息与保活；协议版本 `2025-03-26`（兼容 `2024-11-05`）。
+- **28 个 MCP 工具，严格分两组**：`vb_read_*`（13 个，只读，始终可见）与 `vb_write_*`（15 个，仅在勾选「允许 MCP 客户端写入项目数据」后出现）。
+- **默认只监听 `127.0.0.1`**：绝不默认监听 `0.0.0.0`；开放局域网需在设置窗体手动开启，并弹高危警告。
+- **会话准入授权**：客户端首次真正调用工具（`tools/call`）时弹窗确认，展示客户端连接信息；`listTools` 等预检不弹窗。
+- **默认只读**：`listTools` 动态过滤，写权限需用户在 UI 显式开启；`callTool` 入口二次校验权限。
+- **后台网络线程 + UI 任务队列**：网络 IO 在独立后台线程，工具调用一律投递到 UI 主线程执行，带超时、取消令牌与并发上限，绝不阻塞/带崩界面。
+- **全量 yyjson**：无手写 JSON 序列化代码；协议层错误一律使用 MCP 标准错误对象。
+- **中英双语界面**：菜单、设置窗体、AI 客户端接入向导、帮助文本，以及 MCP `tools/list` 描述与工具错误消息，均跟随 VB Decompiler 主程序语言。
+
+## 安全模型（务必阅读）
+
+| 机制 | 默认行为 | 说明 |
+|---|---|---|
+| 监听地址 | `127.0.0.1:3023` | 仅本机可访问；开放局域网需手动开启 + 高危警告 |
+| CORS | 不返回任何 CORS 头 | 禁止 `Access-Control-Allow-Origin: *`；如需浏览器客户端，需手动配置可信 origin 白名单（注册表 `CorsOrigins`） |
+| 写入权限 | 关闭（只读） | 设置窗体勾选「允许 MCP 客户端写入项目数据」后才出现 `vb_write_*` |
+| 会话准入 | 首次 `tools/call` 弹窗 | 允许本次会话 / 拒绝；服务重启或全部客户端断开后重置 |
+| 体积/限流 | 64MB body、200 req/s、8 个并发任务 | 超限返回 `413` / `429` + MCP 标准错误 |
+
+详见 [SECURITY.md](SECURITY.md)。
 
 ## MCP 工具列表
 <img src="pic/pic1.png" width="500" alt="截图">
-所有工具统一加 `vb_` 前缀，避免与其他 MCP 服务器的同名工具冲突。
+
+所有工具统一加 `vb_` 前缀，避免与其他 MCP 服务器的同名工具冲突；后缀标识读写属性（详见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)）。
+
+### 只读组 `vb_read_*`（只读模式下即可见、可调用）
 
 | 工具 | 说明 |
 |---|---|
-| `vb_get_project_info` | 项目元信息（路径、native/pcode、编译器类型、打包状态） |
-| `vb_get_project_text` / `vb_set_project_text` | 完整项目文本读写 |
-| `vb_clear_buffers` | 清空 VB Decompiler 内部缓冲 |
-| `vb_list_forms` / `vb_get_form` / `vb_set_form` / `vb_rename_form` | Form CRUD |
-| `vb_list_modules` / `vb_get_module` / `vb_set_module` | Module CRUD |
-| `vb_list_module_functions` / `vb_get_function` / `vb_set_function` / `vb_rename_function` | Function CRUD（含反汇编视图） |
-| `vb_get_sub_main` / `vb_set_sub_main` | 入口点 Sub Main |
-| `vb_get_active_text` / `vb_set_active_text` / `vb_goto_line` | 当前激活窗口编辑 / 跳转行号 |
-| `vb_get_active_disasm_text` / `vb_set_active_disasm_text` | 当前反汇编窗口编辑 |
-| `vb_get_active_coords` | 激活视图坐标 |
-| `vb_set_status` | 状态栏控制 |
-| `vb_set_options` | 控制"解析栈参数"和"过程分析器"复选框 |
-| `vb_list_frx_icons` | FRX 图标资源枚举 |
-| `vb_update_all` | 提交所有修改并刷新 GUI |
+| `vb_read_project_info` | 项目元信息（路径、native/pcode、编译器类型、打包状态） |
+| `vb_read_project_text` | 完整项目文本 |
+| `vb_read_list_forms` / `vb_read_form` | Form 列表 / 读取 |
+| `vb_read_list_modules` / `vb_read_module` | Module 列表 / 读取 |
+| `vb_read_list_module_functions` / `vb_read_function` | Function 列表 / 读取（含反汇编视图） |
+| `vb_read_sub_main` | 入口点 Sub Main |
+| `vb_read_active_text` / `vb_read_active_disasm_text` | 当前激活窗口 / 反汇编窗口文本 |
+| `vb_read_active_coords` | 激活视图坐标 |
+| `vb_read_list_frx_icons` | FRX 图标资源枚举 |
 
-分页：`vb_list_forms` / `vb_list_modules` / `vb_list_module_functions` / `vb_list_frx_icons` 接受 `limit`（默认 100，最大 10000）与 `offset`（默认 0），返回 `{count, total_count, offset, limit, has_more, next_offset, ...}`。
+### 写入组 `vb_write_*`（仅勾选写入权限后出现）
+
+| 工具 | 说明 |
+|---|---|
+| `vb_write_project_text` | 覆盖整个项目文本 |
+| `vb_write_clear_buffers` | 清空 VB Decompiler 内部缓冲 |
+| `vb_write_form` / `vb_write_rename_form` | Form 修改 / 重命名 |
+| `vb_write_module` / `vb_write_module_string_references` | Module 声明 / 字符串引用修改 |
+| `vb_write_function` / `vb_write_rename_function` | Function 代码修改 / 重命名 |
+| `vb_write_sub_main` | 修改入口点 |
+| `vb_write_active_text` / `vb_write_active_disasm_text` | 修改当前窗口 / 反汇编窗口文本 |
+| `vb_write_goto_line` | 跳转到指定行 |
+| `vb_write_status` | 设置状态栏文字 |
+| `vb_write_options` | 控制「解析栈参数」「过程分析器」复选框 |
+| `vb_write_update_all` | 提交所有修改并刷新 GUI |
+
+分页：`vb_read_list_forms` / `vb_read_list_modules` / `vb_read_list_module_functions` / `vb_read_list_frx_icons` 接受 `limit`（默认 100，最大 10000）与 `offset`（默认 0），返回 `{count, total_count, offset, limit, has_more, next_offset, ...}`。
 
 ## 快速开始
 
 ### 构建
 
-需要：Visual Studio 2019/2022 + Windows 10+。
+需要：Visual Studio 2019/2022（含 C++ 生成工具，v142）+ Windows 10+。
 
 ```cmd
 build.bat
 ```
 
-输出：`Win32\Release\vbmcp.dll`，并尝试自动部署到 VB Decompiler 的 `Plugins` 文件夹（需管理员权限）。
+输出：`Win32\Release\vbmcp.dll`。工程为 **C++17**（`/std:c++17`、`/EHa`）。
 
 ### 安装
 
@@ -59,16 +89,27 @@ C:\Program Files\VB Decompiler\Plugins\vbmcp.dll
 
 ### 启动
 
-打开 VB Decompiler 后，插件**不会自动启动 MCP 服务器**——这是刻意设计：保证服务器启动那一刻 `VBDecompilerPluginLoad` 重入已完成、Callback Engine（`g_engine`）一定有效。手动启用步骤：
+插件**不会自动启动 MCP 服务器**——这是刻意设计：保证服务器启动那一刻 `VBDecompilerPluginLoad` 重入已完成、Callback Engine 一定有效。
 
 1. 菜单 *Plugins → VB Decompiler MCP Server* 打开设置窗体；
-2. 勾选 **启用 MCP 服务器**，点 *确定*。
+2. 勾选 **启用 MCP 服务器**（可选：勾选 **允许 MCP 客户端写入项目数据**），点 *确定*。
 
-默认监听 `127.0.0.1:3023`；未启用时无任何监听端口。
+未启用时无任何监听端口。
 
 ### 配置
 
-通过设置窗体（菜单 *Plugins → VB Decompiler MCP Server*）修改，或直接编辑注册表：
+设置窗体采用**双属性页**布局：
+
+| 属性页 | 内容 |
+|---|---|
+| **服务设置** | 分组框「服务」：启用 MCP 服务器、绑定 IP 地址、端口号、服务器状态、权限模式（只读/读写）、局域网访问（高级，默认隐藏）；分组框「权限与安全」：允许 MCP 客户端写入项目数据 + 安全说明 + 生效提示 |
+| **接入信息** | 客户端软件下拉（8 个 AI 客户端）→ 自动给出**写入路径**（该客户端的 MCP 配置文件位置）、**连接地址**、可直接粘贴的**配置片段**，以及**接入说明**；每项右侧均有「复制路径 / 复制地址 / 复制配置」按钮 |
+| 底部 | 恢复默认设置 / 帮助 / 确定 / 取消（两页共用） |
+
+> 窗体标题栏可拖拽缩放（最小 640×560，默认 720×636，随 96dpi 设计）；
+> 字号 12pt 并按系统 DPI 缩放；说明类文字使用透明背景，不会出现"带底色的文字块"。
+
+配置可通过设置窗体修改，或直接编辑注册表：
 
 ```
 HKCU\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
@@ -77,38 +118,35 @@ HKCU\SOFTWARE\VB and VBA Program Settings\VB Decompiler\MCP
 | 名称 | 类型 | 说明 | 默认 |
 |---|---|---|---|
 | `Port` | `REG_DWORD` | 监听端口（1–65535） | `3023` |
-| `BindAddress` | `REG_SZ` | 绑定 IP | `127.0.0.1` |
+| `BindAddress` | `REG_SZ` | 绑定 IP（**默认且推荐 `127.0.0.1`**） | `127.0.0.1` |
+| `AllowWrite` | `REG_DWORD` | 允许 MCP 客户端写入项目数据（0/1） | `0`（只读） |
+| `CorsOrigins` | `REG_SZ` | 可信 origin 白名单（逗号分隔；空=不发任何 CORS 头；`*` 被忽略） | 空 |
 
-- 字段缺失或值越界时，插件会用默认值补齐并**自动写回注册表**，方便首次安装时初始化。
-- 在设置窗体改完点 *确定* → 写注册表，并立即启动/停止/重启 MCP 服务器（不需要重启 VB Decompiler）。
-- 直接改注册表 → 需要点一次菜单重新打开设置窗体（或重启 VB Decompiler）让插件重读。
+- 字段缺失或值越界时，插件用默认值补齐并**自动写回注册表**。
+- 设置窗体改完点 *确定* → 写注册表并立即启动/停止/重启服务器。
+- **重启 VB Decompiler 后授权状态重置**（服务不自动启用，需重新勾选）。
 
 ### 界面语言
 
-UI 语言跟随 VB Decompiler 主程序设置，读取：
+UI 语言跟随 VB Decompiler 主程序设置（注册表 `...\VB Decompiler\Options\CustomLanguage`）：
+`ChineseSimplified` → 简体中文；其他值/缺失 → 英文。覆盖菜单、设置窗体、MessageBox、帮助、AI 客户端接入向导，以及 MCP `tools/list` 描述与工具错误消息（UTF-8 JSON）。
 
-```
-HKCU\SOFTWARE\VB and VBA Program Settings\VB Decompiler\Options\CustomLanguage
-```
-
-值为 `ChineseSimplified` → 简体中文；其他值/缺失 → 英文。每次打开设置窗体前会重读该值。
-
-覆盖范围：
-
-- Plugins 菜单项文字、设置窗体全部控件、MessageBox、帮助文本；
-- AI 客户端接入向导（配置文件片段 + 操作步骤，8 个客户端各 EN/ZH 两份）；
-- MCP 协议层：`tools/list` 的工具描述与工具调用的错误消息（UTF-8 JSON，与 HTTP `application/json` 一致）。
+**国际化实现**：gettext 风格，源码里统一写 `_("English text")`，中文译文放在
+`lang_res/zh.json`，构建时以 `RCDATA("JSON_ZH")` **嵌入 vbmcp.dll**
+（不依赖任何外部 langpack）。新增/修改文案后运行 `python tools/extract_i18n.py`
+自动同步语言包并生成待翻译清单；未翻译的词条运行时自动回退英文。详见
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#多语言i18n注意事项)。
 
 ### 调试日志
 
-设置环境变量 `VBMCP_DEBUG_LOG=1` 后，所有插件日志写入 `%TEMP%\vbmcp.log`：
-
 ```cmd
-set VBMCP_DEBUG_LOG=1
-"%ProgramFiles%\VB Decompiler\VB Decompiler.exe"
+set VBMCP_LANG=en          :: 临时强制界面语言（zh/en），优先于注册表设置
+set VBMCP_DEBUG_LOG=1     :: 写 %TEMP%\vbmcp.log
+set VBMCP_LOG_LEVEL=3     :: 0=ERROR 1=WARN 2=INFO(默认) 3=DEBUG
+set VBMCP_TASK_TIMEOUT_MS=30000   :: 单个 MCP 任务超时（毫秒，1000~600000）
 ```
 
-取消设置该变量（或设为 0）则禁用日志。
+日志只记录连接、工具名、权限判定、错误分类与耗时，**不记录任何项目源码/反编译文本**。
 
 ### 测试
 
@@ -116,10 +154,11 @@ set VBMCP_DEBUG_LOG=1
 curl http://127.0.0.1:3023/health
 ```
 
-返回：
 ```json
-{"status":"ready","server":{"name":"VB Decompiler MCP Server","version":"1.0.0","protocolVersion":"2025-03-26"},"instances":[{"name":"VB Decompiler.exe","arch":"Win32","bits":32,"path":"C:\\...","pid":1234,"local":true,"state":"ready","tools_count":27}],"ready":1}
+{"status":"ready","server":{"name":"VB Decompiler MCP Server","version":"2.0.0","protocolVersion":"2025-03-26"},"instances":[{"name":"VB Decompiler.exe","arch":"Win32","bits":32,"path":"C:\\...","pid":1234,"local":true,"state":"ready","readOnly":true,"tools_count":13}],"ready":1}
 ```
+
+`readOnly:true` + `tools_count:13` 表示处于只读模式（勾选写入权限后为 `false` + `28`）。
 
 ### MCP 客户端配置
 
@@ -130,100 +169,110 @@ curl http://127.0.0.1:3023/health
   "mcpServers": {
     "vbmcp": {
       "type": "http",
-      "url": "http://127.0.0.1:3023"
+      "url": "http://127.0.0.1:3023/mcp"
     }
   }
 }
 ```
 
-设置窗体右侧的 AI 客户端下拉内置了 CodeBuddy、VS Code、Cursor、Trae、WorkBuddy、Claude Desktop、Claude Code、OpenAI Codex 的完整接入向导（随界面语言切换），点 *复制配置* 即可把带当前 URL 的配置片段写入剪贴板。
+设置窗体「接入信息」属性页内置 CodeBuddy、VS Code、Cursor、Trae、WorkBuddy、Claude Desktop、Claude Code、OpenAI Codex 的接入向导（随界面语言切换）：选中客户端即可看到它的配置文件位置、连接地址、可直接粘贴的配置片段与接入说明，并可一键复制。
 
-## HTTP 端点
+## HTTP 端点（MCP Streamable HTTP）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/` 或 `/mcp` | JSON-RPC 2.0 入口（MCP `tools/call` 等） |
-| GET  | `/` | SSE 占位（`event: endpoint` + `data: /`） |
-| GET  | `/sse` | 同上（兼容旧客户端） |
-| GET  | `/health` | 健康检查（含工具数、协议版本） |
-| GET  | `/debug/schema` | 返回完整 tools/list schema（调试用） |
-| GET  | `/debug/log` | 最近请求日志环形缓冲（调试用） |
-| POST | `/debug/echo` | 原样回显 POST body（调试用） |
-| OPTIONS | `*` | CORS 预检返回 204 |
+| `POST` | `/`、`/mcp` | JSON-RPC 2.0 入口（`Accept: application/json`）；`initialize` 响应返回 `Mcp-Session-Id` |
+| `GET` | `/`、`/mcp`、`/sse` | 升级为 SSE 长连接（`Accept: text/event-stream`）；服务端推送 + 15s 心跳 |
+| `DELETE` | `/`、`/mcp` | 终止会话（取消在途任务） |
+| `OPTIONS` | `*` | 仅当 `Origin` 命中白名单才回 CORS 头，否则无任何 CORS 头 |
+| `GET` | `/health` | 健康检查（协议版本、只读状态、可见工具数） |
+
+错误约定：**HTTP 状态码表达传输层语义**（400/404/405/406/413/415/429），**响应体始终是 MCP 标准错误对象** `{"jsonrpc":"2.0","id":null,"error":{"code":...,"message":...}}`。
+
+| code | 含义 |
+|---|---|
+| `-32700` / `-32600` / `-32601` | 解析错误 / 非法请求 / 方法不存在 |
+| `-32602` | 参数非法（含未知工具） |
+| `-32603` | 内部错误（含引擎异常、内存不足） |
+| `-32001` | 权限拒绝（会话未授权，或只读模式下调用 `vb_write_*`） |
+| `-32002` | 任务超时（等待 UI 主线程超时） |
+| `-32003` | 服务繁忙（UI 任务队列已满） |
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────┐
-│ VB Decompiler 主进程（GUI）              │
-│  ├─ VBDecompilerPluginLoad 入口         │
-│  └─ 消息循环（窗口/WSAAsyncSelect 派发） │
-│      ├─ WSAStartup（保引用计数≥1）       │
-│      ├─ 隐藏消息窗口 VBMCP_SERVER_V1    │
-│      │   ├─ WM_LISTEN → accept           │
-│      │   ├─ WM_CLIENT → recv/flush/close │
-│      │   └─ 5s 健康检查 timer            │
-│      ├─ HTTP 请求解析（recv_buf）         │
-│      ├─ JSON-RPC 分发                     │
-│      └─ mcp_dispatch_tool                │
-│           └─ g_engine(...) → VB Decompiler│
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ [网络线程]  后台独立线程（mcp_http.cpp）        │
+│  ├ accept / select / HTTP 解析                 │
+│  ├ Streamable HTTP：POST / GET(SSE) / DELETE   │
+│  ├ SSE 推送与心跳                              │
+│  └ UiTask 投递 ──────────────┐                 │
+│            ▲ 响应、超时、取消 │                 │
+├──────────────────────────────┼─────────────────┤
+│ [UI 主线程] VB Decompiler 消息循环              │
+│  ├ 消息窗口 VBMCP_TASK_V1（VBMCP_WM_TASK）     │
+│  │   └ task_pump_on_ui_thread()：执行 MCP 工具  │
+│  │        └ g_engine(...) → VB Decompiler      │
+│  ├ 设置窗体（服务设置 / 接入信息 双属性页）     │
+│  └ 授权弹窗（首次 callTool，仅 UI 线程）       │
+└──────────────────────────────────────────────┘
 ```
 
-**线程模型**：完全单线程。所有 socket IO、HTTP 解析、JSON 解析、VB Decompiler Callback Engine 调用都在 VB Decompiler 主线程（消息循环所在线程）执行，避开 Callback Engine 线程安全问题。
+**线程模型（硬约束）**
 
-### 关键设计决策
+1. 网络线程**只做传输层**：socket、HTTP、SSE；**绝不触碰 UI 控件、UI 对象或 Callback Engine**。
+2. 所有工具调用经 `UiTask` 投递到 UI 主线程串行执行，规避 Callback Engine 的线程安全问题。
+3. 每个任务支持**超时**（默认 30s）与**取消令牌**（客户端断开 / 超时 / 服务停止时置位，排队中的任务直接丢弃）。
+4. **并发上限** `VBMCP_MAX_PENDING_TASKS = 8`：队列满立即返回 `429` + `-32003`，避免多个请求同时触发大项目反编译把 UI 卡死。
+5. 跨线程状态用 `std::atomic` / 互斥量；日志写文件用临界区串行化。
 
-1. **同步处理 HTTP 请求**：VB Decompiler 的 Callback Engine 只能在主线程调用，强制同步处理避免并发问题。MCP 请求是请求-响应的，没有并发需求。
-2. **服务器不自动启动**：VB Decompiler 启动时只读配置、弹设置窗体，绝不开服务器；必须用户在设置窗体勾选启用并点"确定"。
-3. **WSAStartup 一次**：插件保持 Winsock 进程级引用计数≥1，防止 VB Decompiler 其他模块 WSACleanup 时把计数归零关闭所有 socket。
-4. **健康检查 timer**：每 5s 检测监听 socket 是否被外部 WSACleanup 关闭，若失效则自动重建（避免端口"凭空消失"）。
-5. **SO_REUSEADDR**：允许 TIME_WAIT 时重新 bind 同一端口。
-6. **双编码取串**：`vbmcp_t()` 返回 GBK（供 `MessageBoxA` / `SetDlgItemTextA` 等 ANSI 控件），`vbmcp_t_utf8()` 返回 UTF-8（供 MCP JSON-RPC / HTTP `application/json` 响应），两套并行缓存，首次访问后零开销。
-7. **Memory**：所有内存用 CRT malloc/free，VB Decompiler 进程退出时统一回收。
+详细设计与新增工具流程见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)；改造逐项进度见 [docs/REFACTOR_PROGRESS.md](docs/REFACTOR_PROGRESS.md)。
 
 ## 第三方依赖
 
-无。所有代码自包含：
-
-- **HTTP 解析**：手写（约 200 行）
-- **JSON 解析与序列化**：手写（约 350 行，C99）
-- **动态字符串**：手写 strbuf_t（约 120 行）
-- **Winsock 包装**：标准 ws2_32.dll
+- **yyjson**（`third_party/yyjson`，MIT）：唯一的 JSON 依赖，所有 MCP 协议报文均由其构建/解析。
+- **Winsock**（`ws2_32.lib`）：传输层。
+- 其余（HTTP 解析、动态字符串 `strbuf`）为自实现，HTTP 解析器只处理 MCP 所需的最小子集。
 
 ## 限制
 
-- 同一进程只能运行一个 vbmcp 实例（隐藏窗口类名 `VBMCP_SERVER_V1`，避免同进程多实例冲突）
-- 端口 / 绑定 IP 在设置窗体改完点 *确定* 立即生效；若直接编辑注册表，需要点一次菜单触发 `PluginLoad` 重读（或重启 VB Decompiler）
-- 启用状态不持久化：每次 VB Decompiler 重启后默认不启用，需在设置窗体重新勾选
-- 不实现 v3.9 以前的全部命令（部分命令在现代版本的 VB Decompiler 中可能行为不同）
+- 同一进程只能运行一个 vbmcp 实例。
+- 启用状态不持久化：每次 VB Decompiler 重启后默认不启用。
+- 不实现 v3.9 以前的全部命令（部分命令在现代版本的 VB Decompiler 中可能行为不同）。
+- UI 侧任务串行执行：已进入引擎调用的任务无法被取消（引擎同步阻塞），取消令牌作用于排队阶段与结果回写前。
 
 ## 文件结构
 
 ```
 vbmcp/
-├── vbmcp.sln / vbmcp.vcxproj    解决方案 + 项目
-├── schema_dump.vcxproj          调试工具：离线 dump tools/list schema
-├── build.bat                    构建+部署脚本
-├── README.md                    中文版文档
-├── README_EN.md                 英文版文档
+├── vbmcp.sln / vbmcp.vcxproj     解决方案 + 项目（C++17 / Win32）
+├── build.bat                     构建 + 部署脚本
+├── README.md / README_EN.md      中英文文档
+├── SECURITY.md                   安全模型与风险说明
+├── docs/
+│   ├── DEVELOPMENT.md            开发文档（工具命名规范 / 架构 / 新增工具）
+│   └── REFACTOR_PROGRESS.md      改造进度记录
 ├── src/
-│   ├── vbmcp.h                  公共头（配置/常量/全局状态）
-│   ├── vbmcp.def                导出函数定义
-│   ├── strbuf.h / strbuf.c      动态字符串缓冲
-│   ├── json.h / json.c          极简 JSON 解析
-│   ├── util.c                   内存/日志/字符串工具
-│   ├── config.c                 注册表配置读写（Port/BindAddress）
-│   ├── lang.h / lang.c          多语言资源表（EN/ZH）+ CustomLanguage 读取
-│   ├── vbdec_sdk.c              VB Decompiler Callback Engine 封装
-│   ├── mcp_tools.h / mcp_tools.c  27 个 MCP 工具实现
-│   ├── mcp_rpc.c                JSON-RPC 2.0 分发
-│   ├── mcp_http.c               HTTP 服务器 + 事件循环
-│   ├── options_dialog.c         设置窗体（双语 UI + AI 客户端接入向导）
-│   └── plugin_main.c            插件入口（导出函数 + DllMain）
-└── res/
-    ├── vbmcp.rc                 Windows 资源（版本信息）
-    └── resource.h               资源头
+│   ├── vbmcp.h                   公共头（配置 / 常量 / 全局状态 / SDK 封装）
+│   ├── vbmcp_mem.hpp             C++ RAII 助手（SocketHandle / unique_ptr / ScopeGuard）
+│   ├── vbmcp_ids.h              控件/资源 ID（由 res/vbmcp.rc 生成，勿手改）
+│   ├── vbmcp.def                 导出函数定义
+│   ├── strbuf.h / strbuf.cpp     动态字符串缓冲（非 JSON 文本拼装）
+│   ├── util.cpp                  内存 / 分级日志 / 字符串工具
+│   ├── config.cpp                注册表配置读写（Port/BindAddress/AllowWrite/CorsOrigins）
+│   ├── i18n.h / i18n.cpp         gettext 风格翻译（_/_A/_F/_AF）+ zh.json 资源加载
+│   ├── khash.h                   字符串哈希表（i18n 翻译表专用）
+│   ├── vbdec_sdk.cpp             VB Decompiler Callback Engine 封装（含 SEH 保护）
+│   ├── mcp_tools.h / mcp_tools.cpp  28 个 MCP 工具实现（read/write 分组 + 权限校验）
+│   ├── mcp_rpc.cpp               JSON-RPC 2.0 分发 + 会话准入授权
+│   ├── mcp_http.cpp              Streamable HTTP / SSE + 后台网络线程 + UI 任务队列
+│   ├── options_dialog.cpp        设置窗体（双语 UI + 写入权限 + 局域网警告 + 接入向导）
+│   └── plugin_main.cpp           插件入口（导出函数 + DllMain）
+├── res/vbmcp.rc                资源脚本：语言包 + **设置窗体 DIALOGEX 模板** + 版本信息
+├── lang_res/zh.json             中文语言包（RCDATA 嵌入 DLL，随源码提交）
+├── tools/extract_i18n.py        词条提取 / 语言包同步 / 待翻译清单
+├── third_party/yyjson/           JSON 库（以 C 编译）
+└── res/                          Windows 资源（版本信息）
 ```
 
 ## 许可证

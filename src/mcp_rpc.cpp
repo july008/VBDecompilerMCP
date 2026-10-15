@@ -1,242 +1,351 @@
-﻿/*
- * mcp_rpc.c - JSON-RPC 2.0 分发 + MCP 协议层
+/*
+ * mcp_rpc.cpp - JSON-RPC 2.0 分发 + MCP 协议层（yyjson 版）
  *
- * 处理以下 JSON-RPC 方法（MCP 协议要求的）：
- *   - initialize           → 返回 serverInfo + capabilities
- *   - ping                 → 返回 {}
- *   - tools/list           → 返回工具 schema 列表
- *   - tools/call           → 调用工具
- *   - notifications/*      → 不返回响应（HTTP 返回 200 空）
+ * 处理以下 JSON-RPC 方法（MCP 协议要求）：
+ *   - initialize           → serverInfo + capabilities
+ *   - ping                 → {}
+ *   - tools/list           → 动态工具清单（只读模式仅 vb_read_*）
+ *   - tools/call           → 调用工具（含权限二次校验 + 会话准入授权）
+ *   - notifications/*      → 不返回响应（HTTP 202 空 body）
  *
- * 错误：返回 JSON-RPC 2.0 error 对象 {code, message}。
+ * 错误处理：
+ *   - 协议层错误使用 MCP/JSON-RPC 标准错误对象 {code, message}，全部经 yyjson 构建。
+ *     VBMCP_ERR_PERMISSION / VBMCP_ERR_INVALID_PARAMS / VBMCP_ERR_TIMEOUT /
+ *     VBMCP_ERR_INTERNAL 分别映射到标准/保留错误码。
+ *   - 工具业务错误（如项目未加载）走 tools/call 的 isError 内容通道，不占用错误通道。
+ *   - 所有入口 try/except 保护（SEH），单个请求失败不会让 VB Decompiler UI 进程崩溃。
  *
- * 实现原则：
- *  - 全部同步处理（在 VB Decompiler 主线程中），避免 Callback Engine 线程安全问题。
- *  - 每个响应都会立即构造成字符串并返回给 HTTP 层。
+ * 线程模型：全部同步在 VB Decompiler 主线程（WSAAsyncSelect 消息循环）执行，
+ * 避免 Callback Engine 线程安全问题；授权弹窗同样在主线程弹出。
  */
 #include "vbmcp.h"
-#include "json.h"
-#include "mcp_tools.h"
+#include "i18n.h"
+#include "mcp_tools.h"   /* 内含 yyjson.h */
+#include <atomic>
+#include <exception>
 #include <stdio.h>
 
 /* ============================================================
- * JSON-RPC 响应构造辅助
+ * 会话准入授权（首次 callTool 弹窗）
+ *
+ * listTools / initialize / ping 属于预检，不弹窗；只有真正调用工具
+ * （tools/call）才触发一次授权弹窗。授权只控制会话准入，不替代
+ * "允许写入"开关。
+ *
+ * 状态用 std::atomic：写入方是 UI 主线程（弹窗），重置方可能是后台网络线程
+ * （所有连接断开 / 服务停止），读取方是 UI 主线程。
  * ============================================================ */
+static std::atomic<bool> g_session_authorized{ false };  /* 本次会话已授权 */
+static std::atomic<bool> g_session_denied{ false };      /* 用户已拒绝：拒绝所有后续请求 */
 
-static char *make_rpc_result(const char *id_raw, const char *result_json)
+int vbmcp_session_authorize(const char *client_info)
 {
-    strbuf_t b;
-    sb_init(&b);
-    /* 用 sb_append_str 自动 strlen，避免手算字节数错（C 里 \" 是 1 字节）。 */
-    sb_append_str(&b, "{\"jsonrpc\":\"2.0\",\"id\":");
-    if (id_raw && *id_raw) sb_append_str(&b, id_raw);
-    else sb_append_str(&b, "null");
-    sb_append_str(&b, ",\"result\":");
-    if (result_json) sb_append_str(&b, result_json);
-    else sb_append_str(&b, "null");
-    sb_append_char(&b, '}');
-    sb_finalize(&b);
-    return b.buf;
-}
+    if (g_session_authorized.load()) return 1;
+    if (g_session_denied.load())     return 0;
 
-static char *make_rpc_error(const char *id_raw, int code, const char *msg)
-{
-    strbuf_t b;
-    sb_init(&b);
-    sb_append_str(&b, "{\"jsonrpc\":\"2.0\",\"id\":");
-    if (id_raw && *id_raw) sb_append_str(&b, id_raw);
-    else sb_append_str(&b, "null");
-    sb_printf(&b, ",\"error\":{\"code\":%d,\"message\":", code);
-    sb_append_json_string(&b, msg ? msg : "error");
-    sb_append_str(&b, "}}");
-    sb_finalize(&b);
-    return b.buf;
-}
+    /* _AF：先翻译再格式化，并转成 ANSI(GBK) 供 MessageBoxA 使用 */
+    char *msg = _AF("An MCP client is trying to access this VB Decompiler project data.\n\nClient: %s\n\nChoose \"Yes\" to allow this session, or \"No\" to deny all requests.\n(Read-only mode is still enforced separately by the write permission switch.)",
+                    client_info ? client_info : "unknown");
 
-/* ============================================================
- * 通知请求体解析（method, params, id）
- * 这些函数接收**已解析**的 jv_value_t*（由 vbmcp_process_jsonrpc
- * 入口处 jv_parse 一次得到），避免每个字段都重复解析整段 body。
- * 调用方负责 jv_free 返回的字符串/对象。
- * ============================================================ */
-
-static char *extract_id_raw(const jv_value_t *req)
-{
-    if (!req || req->type != JV_OBJECT) return NULL;
-    jv_value_t *id = jv_obj_get(req, "id");
-    if (!id) return NULL;
-    if (id->type == JV_NULL)  return vbmcp_strdup("null");
-    if (id->type == JV_STRING) return vbmcp_strdup(id->u.s ? id->u.s : "");
-    if (id->type == JV_NUMBER) {
-        char tmp[64];
-        int n = _snprintf_s(tmp, sizeof(tmp), _TRUNCATE, "%g", id->u.n);
-        if (n < 0) return NULL;
-        return vbmcp_strndup(tmp, (size_t)n);
+    /* UI 主线程弹窗：Yes = 允许本次会话，No = 拒绝。 */
+    const int r = MessageBoxA(g_main_hwnd, msg,
+                              _A("VB Decompiler MCP Server - Access Request"),
+                              MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST);
+    if (r == IDYES) {
+        g_session_authorized.store(true);
+        vbmcp_logf(VBMCP_LOG_INFO, "session authorized by user (client=%s)",
+                   client_info ? client_info : "unknown");
+        return 1;
     }
-    /* id 为对象/数组（罕见）：完整 dump 保形 */
-    strbuf_t b;
-    sb_init(&b);
-    jv_dump(id, &b);
-    sb_finalize(&b);
-    return b.buf;
+    g_session_denied.store(true);
+    vbmcp_logf(VBMCP_LOG_WARN, "session denied by user (client=%s)",
+               client_info ? client_info : "unknown");
+    return 0;
 }
 
-static char *extract_method(const jv_value_t *req)
+void vbmcp_session_reset(void)
 {
-    if (!req || req->type != JV_OBJECT) return NULL;
-    const char *m = jv_obj_get_string(req, "method");
-    return m ? vbmcp_strdup(m) : NULL;
-}
-
-/* 从 params.arguments 解出 tool name（MCP tools/call 规范）。 */
-static char *extract_tool_name(const jv_value_t *req)
-{
-    if (!req || req->type != JV_OBJECT) return NULL;
-    jv_value_t *params = jv_obj_get(req, "params");
-    const char *n = (params && params->type == JV_OBJECT)
-                    ? jv_obj_get_string(params, "name") : NULL;
-    return n ? vbmcp_strdup(n) : NULL;
-}
-
-/* 从请求中取出 arguments 对象（深拷贝为新jv_value_t）。
- * 调用方负责 jv_free。改用 jv_deep_copy 替代 dump+parse（O(N) 节点遍历）。 */
-static jv_value_t *extract_arguments(const jv_value_t *req)
-{
-    if (!req || req->type != JV_OBJECT) return NULL;
-    jv_value_t *params = jv_obj_get(req, "params");
-    if (!params || params->type != JV_OBJECT) return NULL;
-    jv_value_t *args = jv_obj_get(params, "arguments");
-    if (!args) return NULL;
-    return jv_deep_copy(args);
+    g_session_authorized.store(false);
+    g_session_denied.store(false);
 }
 
 /* ============================================================
- * tools/call 响应包装
- * tools/call 的 result 必须是 {"content":[{"type":"text","text":"<JSON>"}], "isError":bool}
+ * 响应构造（yyjson）
  * ============================================================ */
 
-static char *wrap_tool_result(const char *tool_result_json, int is_error)
+/* 序列化并释放 mutable doc（带 ALLOW_INVALID_UNICODE，因结果可能含 GBK 字节）。 */
+static char *rpc_serialize(yyjson_mut_doc *doc)
 {
-    strbuf_t b;
-    sb_init(&b);
-    /* 用 sb_append_str 自动取 strlen——之前用 sb_append 写死 32 字节但字面量
-     * "{\"content\":[{\"type\":\"text\",\"text\":\" 实际是 34 字节（C 里 \" 是 1 字节），
-     * 漏 2 字节导致 tools/call 响应永远是截断的非法 JSON，CodeBuddy 严格
-     * 解析失败 → 后续所有工具调用都丢 → 即便 list 显示 0 个也算了，反正 0 个
-     * 调不出来。这里改成 sb_append_str 杜绝手算字节数。 */
-    sb_append_str(&b, "{\"content\":[{\"type\":\"text\",\"text\":");
-    sb_append_json_string(&b, tool_result_json ? tool_result_json : "");
-    sb_printf(&b, "}],\"isError\":%s}", is_error ? "true" : "false");
-    sb_finalize(&b);
-    return b.buf;
+    char *s = NULL;
+    if (doc) {
+        s = yyjson_mut_write(doc, YYJSON_WRITE_ALLOW_INVALID_UNICODE, NULL);
+        yyjson_mut_doc_free(doc);
+    }
+    return s;
 }
 
-/* 把协商后的协议版本写入 HTTP 层的全局变量，使后续响应头带
- * MCP-Protocol-Version。MCP 2025-03 规范要求 initialize 之后必带。
- * 由 vbmcp_process_jsonrpc("initialize") 调用一次。 */
+/* 新建响应 doc：{"jsonrpc":"2.0","id":<id>}。id 缺失时写 null。 */
+static yyjson_mut_doc *resp_new(yyjson_mut_val **root_out, const yyjson_val *idv)
+{
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) return NULL;
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    if (!root) { yyjson_mut_doc_free(doc); return NULL; }
+    yyjson_mut_doc_set_root(doc, root);
+
+    yyjson_mut_obj_add_strcpy(doc, root, "jsonrpc", "2.0");
+    yyjson_mut_val *mid = idv ? yyjson_val_mut_copy(doc, idv) : NULL;
+    yyjson_mut_obj_add_val(doc, root, "id", mid ? mid : yyjson_mut_null(doc));
+
+    *root_out = root;
+    return doc;
+}
+
+/* 往已建好的响应 root 上挂 error 对象。 */
+static void add_error(yyjson_mut_doc *doc, yyjson_mut_val *root, int code, const char *msg)
+{
+    yyjson_mut_val *err = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, err, "code", code);
+    yyjson_mut_obj_add_strcpy(doc, err, "message", msg ? msg : "error");
+    yyjson_mut_obj_add_val(doc, root, "error", err);
+}
+
+/* 独立构造一个错误响应（含 jsonrpc/id）。 */
+static char *make_error_resp(const yyjson_val *idv, int code, const char *msg)
+{
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = resp_new(&root, idv);
+    if (!doc) return NULL;
+    add_error(doc, root, code, msg);
+    return rpc_serialize(doc);
+}
+
+/* 从工具错误负载 {"error":"..."} 中取出错误文本（new alloc，可为 NULL）。
+ * 错误文本来自 lang 表（UTF-8），因此读侧解析安全。 */
+static char *payload_error_text(const char *payload)
+{
+    if (!payload) return NULL;
+    yyjson_doc *d = yyjson_read(payload, strlen(payload),
+                                YYJSON_READ_ALLOW_INVALID_UNICODE);
+    if (!d) return NULL;
+    yyjson_val *r = yyjson_doc_get_root(d);
+    const char *msg = yyjson_get_str(yyjson_obj_get(r, "error"));
+    char *out = msg ? vbmcp_strdup(msg) : NULL;
+    yyjson_doc_free(d);
+    return out;
+}
+
+/* 把工具结果负载包装成 MCP tools/call 结果：
+ *   {"content":[{"type":"text","text":"<payload>"}],"isError":bool} */
+static void add_tool_result(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                            const char *payload, int is_error)
+{
+    yyjson_mut_val *result  = yyjson_mut_obj(doc);
+    yyjson_mut_val *content = yyjson_mut_arr(doc);
+    yyjson_mut_val *item    = yyjson_mut_arr_add_obj(doc, content);
+    yyjson_mut_obj_add_strcpy(doc, item, "type", "text");
+    yyjson_mut_obj_add_strcpy(doc, item, "text", payload ? payload : "");
+    yyjson_mut_obj_add_val(doc, result, "content", content);
+    yyjson_mut_obj_add_bool(doc, result, "isError", is_error);
+    yyjson_mut_obj_add_val(doc, root, "result", result);
+}
+
+/* 把协商后的协议版本写入 HTTP 层全局变量，使后续响应头带 MCP-Protocol-Version。 */
 void vbmcp_set_active_protocol_version(const char *ver)
 {
     vbmcp_http_set_protocol_version(ver);
 }
 
 /* ============================================================
- * 主要：处理 JSON-RPC body，返回响应字符串（new alloc）
- * 返回 ""（空串）表示 notification（HTTP 仍 200 但无 body）
- * 返回 NULL 表示解析错误 / 不支持的方法（应返回 4xx 或 -32601）
+ * initialize 结果
  * ============================================================ */
-
-char *vbmcp_process_jsonrpc(const char *body)
+static void add_initialize_result(yyjson_mut_doc *doc, yyjson_mut_val *root)
 {
-    if (!body || !*body) return make_rpc_error(NULL, -32700, "Parse error: empty body");
+    yyjson_mut_val *result = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, result, "protocolVersion", VBMCP_PROTOCOL);
 
-    /* 整个 RPC 请求只解析一次 JSON。所有 extract_* 都复用同一棵解析树，
-     * 之前每个字段都 jv_parse(body) → 3 次解析；10MB project_text 等大 body
-     * 影响最明显。 */
-    jv_value_t *req = jv_parse(body);
-    if (!req || req->type != JV_OBJECT) {
-        jv_free(req);
-        return make_rpc_error(NULL, -32700, "Parse error: invalid JSON-RPC request");
+    yyjson_mut_val *caps = yyjson_mut_obj(doc);
+    yyjson_mut_val *tools = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, tools, "listChanged", 0);
+    yyjson_mut_obj_add_val(doc, caps, "tools", tools);
+    yyjson_mut_val *prompts = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, prompts, "listChanged", 0);
+    yyjson_mut_obj_add_val(doc, caps, "prompts", prompts);
+    yyjson_mut_val *res = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, res, "subscribe", 0);
+    yyjson_mut_obj_add_bool(doc, res, "listChanged", 0);
+    yyjson_mut_obj_add_val(doc, caps, "resources", res);
+    yyjson_mut_obj_add_val(doc, result, "capabilities", caps);
+
+    yyjson_mut_val *info = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, info, "name", VBMCP_PLUGIN_NAME);
+    yyjson_mut_obj_add_strcpy(doc, info, "version", VBMCP_VERSION);
+    yyjson_mut_obj_add_val(doc, result, "serverInfo", info);
+
+    yyjson_mut_obj_add_strcpy(doc, result, "instructions",
+        "VB Decompiler MCP server. Tools operate on the currently opened "
+        "decompiled VB project. Read tools (vb_read_*) are always available; "
+        "write tools (vb_write_*) require the user to enable write access in "
+        "the plugin settings. Get info first, then list/get/set modules, forms, "
+        "functions.");
+
+    yyjson_mut_obj_add_val(doc, root, "result", result);
+}
+
+/* ============================================================
+ * tools/call 处理
+ * ============================================================ */
+static void handle_tools_call(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                              yyjson_val *req, const char *client_info)
+{
+    yyjson_val *params = yyjson_obj_get(req, "params");
+    const char *tool_name = NULL;
+    yyjson_val *arguments = NULL;
+    if (params && yyjson_is_obj(params)) {
+        yyjson_val *n = yyjson_obj_get(params, "name");
+        if (n && yyjson_is_str(n)) tool_name = yyjson_get_str(n);
+        arguments = yyjson_obj_get(params, "arguments");
     }
 
-    char *method = extract_method(req);
-    char *id_raw = extract_id_raw(req);
-    jv_value_t *args = extract_arguments(req);
+    if (!tool_name || !*tool_name) {
+        add_error(doc, root, VBMCP_ERR_INVALID_PARAMS, _("Tool name is empty"));
+        return;
+    }
+
+    /* 会话准入授权：仅真正调用工具时触发（listTools 属于预检，不弹窗）。
+     * 本函数在 UI 主线程执行（任务队列保证），因此 MessageBox 是安全的。 */
+    if (!vbmcp_session_authorize(client_info)) {
+        vbmcp_logf(VBMCP_LOG_WARN, "tools/call rejected: session not authorized (tool=%s)",
+                   tool_name);
+        add_error(doc, root, VBMCP_ERR_PERMISSION, _("Access denied: the user rejected this MCP session. All subsequent requests from this session will be rejected."));
+        return;
+    }
+
+    const int allow_write = g_allow_write.load();
+
+    /* 防御兜底（双重权限校验的第二道）：即使客户端绕过 tools/list 强行
+     * 调用 vb_write_*，callTool 入口也必须二次校验权限，否则直接返回
+     * MCP 权限错误，绝不执行业务。 */
+    if (mcp_tool_is_write(tool_name) && !allow_write) {
+        vbmcp_logf(VBMCP_LOG_WARN,
+                   "tools/call denied: write tool in read-only mode (tool=%s)", tool_name);
+        add_error(doc, root, VBMCP_ERR_PERMISSION, _("Write access is disabled. All vb_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings."));
+        return;
+    }
+
+    int ecode = VBMCP_ERR_OK;
+    char *payload = mcp_dispatch_tool(tool_name, arguments, allow_write, &ecode);
+    vbmcp_logf(VBMCP_LOG_INFO, "tools/call tool=%s write=%d err=%d",
+               tool_name, mcp_tool_is_write(tool_name), ecode);
+
+    if (!payload) {
+        add_error(doc, root, VBMCP_ERR_INTERNAL, _("Out of memory"));
+        return;
+    }
+
+    /* 权限 / 参数 / 内部错误 → JSON-RPC 标准错误通道。 */
+    if (ecode == VBMCP_ERR_PERMISSION || ecode == VBMCP_ERR_INVALID_PARAMS ||
+        ecode == VBMCP_ERR_INTERNAL  || ecode == VBMCP_ERR_TIMEOUT) {
+        char *msg = payload_error_text(payload);
+        add_error(doc, root, ecode, msg ? msg : "tool error");
+        vbmcp_free(msg);
+        vbmcp_free(payload);
+        return;
+    }
+
+    /* 成功 / 业务错误 → tools/call 内容通道（isError 标记）。 */
+    add_tool_result(doc, root, payload, ecode != VBMCP_ERR_OK);
+    vbmcp_free(payload);
+}
+
+/* ============================================================
+ * 主要入口
+ * ============================================================ */
+static char *process_jsonrpc_impl(const char *body, const char *client_info);
+
+char *vbmcp_process_jsonrpc(const char *body, const char *client_info)
+{
+    /* 入口防御：任何 C++ 异常都必须转成 MCP 标准错误，
+     * 绝不允许把 VB Decompiler UI 进程带崩（外层任务队列另有一层保护）。 */
+    try {
+        return process_jsonrpc_impl(body, client_info);
+    } catch (const std::exception &e) {
+        vbmcp_logf(VBMCP_LOG_ERROR, "jsonrpc threw std::exception: %s", e.what());
+    } catch (...) {
+        vbmcp_logf(VBMCP_LOG_ERROR, "jsonrpc threw unknown exception");
+    }
+    return make_error_resp(NULL, VBMCP_ERR_INTERNAL, "Internal error");
+}
+
+static char *process_jsonrpc_impl(const char *body, const char *client_info)
+{
+    if (!body || !*body)
+        return make_error_resp(NULL, VBMCP_ERR_PARSE, "Parse error: empty body");
+
+    /* 只解析一次；容忍非法 Unicode 与 BOM（客户端可能回传 GBK 项目文本）。 */
+    yyjson_doc *req_doc = yyjson_read(body, strlen(body),
+                                      YYJSON_READ_ALLOW_INVALID_UNICODE | YYJSON_READ_ALLOW_BOM);
+    if (!req_doc)
+        return make_error_resp(NULL, VBMCP_ERR_PARSE, "Parse error: invalid JSON");
+
+    yyjson_val *req = yyjson_doc_get_root(req_doc);
+    if (!req || !yyjson_is_obj(req)) {
+        yyjson_doc_free(req_doc);
+        return make_error_resp(NULL, VBMCP_ERR_INVALID_REQUEST, "Invalid request: not a JSON object");
+    }
+
+    yyjson_val *idv = yyjson_obj_get(req, "id");
+    yyjson_val *m = yyjson_obj_get(req, "method");
+    const char *method = (m && yyjson_is_str(m)) ? yyjson_get_str(m) : NULL;
 
     if (!method) {
-        char *err = make_rpc_error(id_raw, -32600, "Missing method");
-        if (args) jv_free(args);
-        if (id_raw) vbmcp_free(id_raw);
-        jv_free(req);
-        return err;
+        char *e = make_error_resp(idv, VBMCP_ERR_INVALID_REQUEST, "Missing method");
+        yyjson_doc_free(req_doc);
+        return e;
     }
 
-    char *resp = NULL;
+    /* notification：不返回 JSON-RPC 响应（HTTP 层回 202 空 body）。 */
+    if (vb_streq(method, "notifications/initialized") ||
+        vb_streq(method, "notifications/cancelled") ||
+        vb_streq(method, "notifications/progress") ||
+        vb_streq(method, "notifications/roots/list_changed")) {
+        yyjson_doc_free(req_doc);
+        return vbmcp_strdup("");
+    }
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = resp_new(&root, idv);
+    if (!doc) { yyjson_doc_free(req_doc); return NULL; }
 
     if (vb_streq(method, "initialize")) {
-        /* 对照 iida-mcp：服务端硬编码回 "2025-03-26"，不做协商，
-         * 与 iida 行为一致。CodeBuddy 客户端无论发哪个版本，都能接受
-         * 服务端回 "2025-03-26"。 */
         vbmcp_set_active_protocol_version(VBMCP_PROTOCOL);
-
-        strbuf_t b;
-        sb_init(&b);
-        sb_printf(&b,
-            "{\"protocolVersion\":\"%s\","
-            "\"capabilities\":{"
-              "\"tools\":{\"listChanged\":false},"
-              "\"prompts\":{\"listChanged\":false},"
-              "\"resources\":{\"subscribe\":false,\"listChanged\":false}"
-            "},"
-            "\"serverInfo\":{\"name\":\"%s\",\"version\":\"%s\"},"
-            "\"instructions\":\"VB Decompiler MCP server. Tools operate on the currently opened decompiled VB project. Get info first, then list/get/set modules, forms, functions.\"}",
-            VBMCP_PROTOCOL,
-            VBMCP_PLUGIN_NAME,
-            VBMCP_VERSION);
-        sb_finalize(&b);
-        resp = make_rpc_result(id_raw, b.buf);
-        sb_free(&b);
+        add_initialize_result(doc, root);
     }
     else if (vb_streq(method, "ping")) {
-        resp = make_rpc_result(id_raw, "{}");
+        yyjson_mut_obj_add_val(doc, root, "result", yyjson_mut_obj(doc));
     }
     else if (vb_streq(method, "tools/list")) {
-        /* MCP 规范要求 result.tools 是数组。
-         * mcp_build_local_tools_array() 只返回 "[{...},{...}]"（将来合并上游数组用），
-         * 这里必须用 mcp_build_tools_schema()，已包 {"tools":[...]}。 */
-        char *schema = mcp_build_tools_schema();
-        resp = make_rpc_result(id_raw, schema ? schema : "{\"tools\":[]}");
-        if (schema) vbmcp_free(schema);
+        /* 动态工具清单：只读模式仅 vb_read_*，开启写入后追加 vb_write_*。
+         * 客户端据此动态隐藏 write 工具，无需重启连接。 */
+        const int allow_write = g_allow_write.load();
+        yyjson_mut_val *result = yyjson_mut_obj(doc);
+        yyjson_mut_val *arr = yyjson_mut_arr(doc);
+        mcp_build_tools_into(doc, arr, allow_write);
+        yyjson_mut_obj_add_val(doc, result, "tools", arr);
+        yyjson_mut_obj_add_val(doc, root, "result", result);
+        vbmcp_logf(VBMCP_LOG_INFO, "tools/list allow_write=%d count=%d",
+                   allow_write, mcp_local_tool_count(allow_write));
     }
     else if (vb_streq(method, "tools/call")) {
-        char *tool_name = extract_tool_name(req);
-        jv_value_t *result = mcp_dispatch_tool(tool_name ? tool_name : "", args);
-        strbuf_t b;
-        sb_init(&b);
-        jv_dump(result, &b);
-        sb_finalize(&b);
-        int is_err = (result && jv_obj_get(result, "error") != NULL) ? 1 : 0;
-        char *wrapped = wrap_tool_result(b.buf, is_err);
-        resp = make_rpc_result(id_raw, wrapped);
-        vbmcp_free(wrapped);
-        sb_free(&b);
-        if (result) jv_free(result);
-        if (tool_name) vbmcp_free(tool_name);
-    }
-    else if (vb_streq(method, "notifications/initialized") ||
-             vb_streq(method, "notifications/cancelled") ||
-             vb_streq(method, "notifications/progress")) {
-        /* notification: 不返回 JSON-RPC 响应，但 HTTP 必须 200 空 body */
-        resp = vbmcp_strdup("");
+        handle_tools_call(doc, root, req, client_info);
     }
     else {
         char buf[256];
-        snprintf(buf, sizeof(buf), "Method not found: %s", method);
-        resp = make_rpc_error(id_raw, -32601, buf);
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "Method not found: %s", method);
+        add_error(doc, root, VBMCP_ERR_METHOD_NOT_FOUND, buf);
     }
 
-    if (args) jv_free(args);
-    if (id_raw) vbmcp_free(id_raw);
-    if (method) vbmcp_free(method);
-    jv_free(req);
-    return resp;
+    char *out = rpc_serialize(doc);
+    yyjson_doc_free(req_doc);
+    return out;
 }

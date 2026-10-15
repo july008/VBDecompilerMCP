@@ -58,6 +58,10 @@
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <!-- /EHa：C++ 异常（try/catch 包住 MCP 入口）与 vbdec_sdk 的 SEH __try 保护共存 -->
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalIncludeDirectories>$(ProjectDir)third_party\yyjson\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -76,6 +80,10 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;VBMCP_EXPORTS;_CRT_SECURE_NO_WARNINGS;NOMINMAX;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <!-- /EHa：C++ 异常（try/catch 包住 MCP 入口）与 vbdec_sdk 的 SEH __try 保护共存 -->
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <AdditionalIncludeDirectories>$(ProjectDir)third_party\yyjson\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -88,31 +96,81 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="src\json.h" />
-    <ClInclude Include="src\lang.h" />
+    <ClInclude Include="res\resource.h" />
+    <ClInclude Include="src\i18n.h" />
+    <ClInclude Include="src\khash.h" />
     <ClInclude Include="src\mcp_tools.h" />
-    <ClInclude Include="src\strbuf.h" />
     <ClInclude Include="src\vbmcp.h" />
+    <ClInclude Include="src\vbmcp_ids.h" />
+    <ClInclude Include="src\vbmcp_mem.hpp" />
+    <ClInclude Include="third_party\yyjson\src\yyjson.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\config.c" />
-    <ClCompile Include="src\json.c" />
-    <ClCompile Include="src\lang.c" />
-    <ClCompile Include="src\mcp_http.c" />
-    <ClCompile Include="src\mcp_rpc.c" />
-    <ClCompile Include="src\mcp_tools.c" />
-    <ClCompile Include="src\options_dialog.c" />
-    <ClCompile Include="src\plugin_main.c" />
-    <ClCompile Include="src\strbuf.c" />
-    <ClCompile Include="src\util.c" />
-    <ClCompile Include="src\vbdec_sdk.c" />
+    <ClCompile Include="src\config.cpp" />
+    <ClCompile Include="src\i18n.cpp" />
+    <ClCompile Include="src\mcp_http.cpp" />
+    <ClCompile Include="src\mcp_rpc.cpp" />
+    <ClCompile Include="src\mcp_tools.cpp" />
+    <ClCompile Include="src\options_dialog.cpp" />
+    <ClCompile Include="src\plugin_main.cpp" />
+    <ClCompile Include="src\util.cpp" />
+    <ClCompile Include="src\vbdec_sdk.cpp" />
+    <!-- 第三方库保持 C 编译（yyjson 官方源码为 C99） -->
+    <ClCompile Include="third_party\yyjson\src\yyjson.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="src\vbmcp.def" />
+    <None Include="lang_res\zh.json" />
   </ItemGroup>
   <ItemGroup>
+    <!-- res/vbmcp.rc is owned by the Visual Studio resource editor: every save
+         rewrites the whole file and drops "#include <windows.h>", which rc.exe
+         needs for the DIALOGEX keywords (DS_SETFONT / WS_* / ES_* / BS_* ...).
+         So it is NOT compiled directly: the VbmcpPrepRc target below builds a
+         wrapper that pulls windows.h in first and then includes it verbatim,
+         which lets the UI be edited in the resource editor without breaking
+         the build. -->
     <ResourceCompile Include="res\vbmcp.rc" />
   </ItemGroup>
+  <PropertyGroup>
+    <BeforeResourceCompileTargets>$(BeforeResourceCompileTargets);VbmcpPrepRc</BeforeResourceCompileTargets>
+  </PropertyGroup>
+  <Target Name="VbmcpPrepRc">
+    <MakeDir Directories="$(IntDir)rc" />
+    <!-- rc.exe resolves a RCDATA file name relative to the file being compiled,
+         which here is $(IntDir)rc\vbmcp_build.rc. The language pack therefore
+         has to sit one level above it for the "..\lang_res\zh.json" path that
+         vbmcp.rc uses to keep resolving. -->
+    <Copy SourceFiles="$(ProjectDir)lang_res\zh.json"
+          DestinationFolder="$(IntDir)lang_res"
+          SkipUnchangedFiles="true" />
+    <PropertyGroup>
+      <VbmcpRcWrapper>/* 由 VbmcpPrepRc 生成，勿手改（每次构建都会重写）。
+   1) 先引入 DIALOGEX 模板关键字（DS_SETFONT / WS_* / ES_* ... 都在 windows.h 里）。
+      注意：VS 资源编辑器保存时会删掉 .rc 里的 #include &lt;windows.h&gt;，所以只能在这里补。
+      用 windows.h 而不是更轻的 winresrc.h：后者带来的宏集合不同，冲突反而更多。
+   2) 下面三个 #undef 用来消掉 RC4005 重定义警告：windows.h 已定义它们，而编辑器生成的
+      resource.h 会用相同值再定义一次（rc.exe 对"值相同"的重定义也报警）。
+      模板里不会用到这三个宏，#undef 之后 resource.h 的定义成为首次定义，警告消失。 */
+#include &lt;windows.h&gt;
+#undef HTERROR
+#undef PWR_FAIL
+#undef HTTRANSPARENT
+#include &quot;$(ProjectDir)res\vbmcp.rc&quot;</VbmcpRcWrapper>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(IntDir)rc\vbmcp_build.rc"
+                      Lines="$(VbmcpRcWrapper)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <!-- Swap the editor-owned script for the wrapper. ResourceCompile has no
+           ExcludedFromBuild support, so the item list is edited here instead. -->
+      <ResourceCompile Remove="res\vbmcp.rc" />
+      <ResourceCompile Include="$(IntDir)rc\vbmcp_build.rc" />
+    </ItemGroup>
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
