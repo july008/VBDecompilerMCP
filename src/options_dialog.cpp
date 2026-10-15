@@ -759,8 +759,11 @@ static int confirm_open_bind_warning(HWND hDlg, const char *bind)
     _snprintf_s(msg, sizeof(msg), _TRUNCATE,
                 _A("You are about to make the MCP server listen on \"%s\", which is NOT the loopback address (127.0.0.1).\n\nThis exposes the server to your LAN / public network. The MCP spec does not recommend running without authentication on a non-local interface, and any MCP client (including AI agents) on the network could read - or, if write access is enabled, modify - your project data.\n\nProceed anyway?"),
                 bind);
+    /* owner 是本对话框（模态链已保证前台），不需要 MB_TOPMOST ——
+     * 它与模态 owner 组合反而会导致"置顶但无法正常激活/拖动"（见
+     * mcp_rpc.cpp 授权弹窗处的同款说明）。 */
     const int r = MessageBoxA(hDlg, msg, _A("Security Warning - Non-loopback Listen Address"),
-                              MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST);
+                              MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
     return (r == IDYES);
 }
 

@@ -47,10 +47,18 @@ int vbmcp_session_authorize(const char *client_info)
     char *msg = _AF("An MCP client is trying to access this VB Decompiler project data.\n\nClient: %s\n\nChoose \"Yes\" to allow this session, or \"No\" to deny all requests.\n(Read-only mode is still enforced separately by the write permission switch.)",
                     client_info ? client_info : "unknown");
 
-    /* UI 主线程弹窗：Yes = 允许本次会话，No = 拒绝。 */
-    const int r = MessageBoxA(g_main_hwnd, msg,
+    /* UI 主线程弹窗：Yes = 允许本次会话，No = 拒绝。
+     * 参数选择（有实测教训）：
+     *   - 用 MB_SETFOREGROUND，**不要** MB_TOPMOST：TOPMOST 的模态框在
+     *     宿主自己也有模态窗口（设置窗体等）时会出现"置顶但无法正常激活"
+     *     的怪象，表现为标题栏拖不动、按钮点不动（用户实测反馈）；
+     *   - owner 必须是有效窗口：优先宿主主窗口，拿不到时退回当前前台窗口，
+     *     避免产生无 owner 的孤立对话框（Z 序与激活都会更不可靠）。 */
+    HWND owner = (g_main_hwnd && IsWindow(g_main_hwnd)) ? g_main_hwnd
+                                                       : GetForegroundWindow();
+    const int r = MessageBoxA(owner, msg,
                               _A("VB Decompiler MCP Server - Access Request"),
-                              MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST);
+                              MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND);
     if (r == IDYES) {
         g_session_authorized.store(true);
         vbmcp_logf(VBMCP_LOG_INFO, "session authorized by user (client=%s)",
