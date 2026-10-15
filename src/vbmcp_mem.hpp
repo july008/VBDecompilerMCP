@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace vbmcp {
 
@@ -53,7 +54,33 @@ private:
     SOCKET sock_ = INVALID_SOCKET;
 };
 
-/* 作用域守卫：析构时执行 fn（用于"离开作用域即恢复标志位"这类逻辑）。 */
+/* 作用域守卫：析构时执行 fn（用于"离开作用域即恢复标志位"这类逻辑）。
+ * 用法：auto guard = vbmcp::make_scope_guard([&] { flag = false; }); */
+template <typename Fn>
+class ScopeGuard {
+public:
+    explicit ScopeGuard(Fn fn) : fn_(std::move(fn)) {}
+    ScopeGuard(const ScopeGuard&) = delete;
+    ScopeGuard& operator=(const ScopeGuard&) = delete;
+    ScopeGuard(ScopeGuard&& o) noexcept : fn_(std::move(o.fn_)), armed_(o.armed_)
+    {
+        o.armed_ = false;
+    }
+    ~ScopeGuard() { if (armed_) fn_(); }
+
+    /* 提前解除（析构时不再执行 fn） */
+    void dismiss() noexcept { armed_ = false; }
+
+private:
+    Fn   fn_;
+    bool armed_ = true;
+};
+
+template <typename Fn>
+ScopeGuard<Fn> make_scope_guard(Fn fn)
+{
+    return ScopeGuard<Fn>(std::move(fn));
+}
 
 } // namespace vbmcp
 

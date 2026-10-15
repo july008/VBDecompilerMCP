@@ -8,8 +8,9 @@ setlocal enabledelayedexpansion
 set "PROJECT_DIR=%~dp0"
 set "SOLUTION=%PROJECT_DIR%vbmcp.sln"
 
-REM VB Decompiler 安装目录（安装位置不同时请修改）
-set "VBDEC_DIR=E:\Ollydbg\VB Decompiler Pro v11.5"
+REM VB Decompiler 安装目录：优先取环境变量 VBDEC_DIR（可先 set VBDEC_DIR=...），
+REM 未设置时用下面的默认值（安装位置不同时请修改这里）
+if not defined VBDEC_DIR set "VBDEC_DIR=E:\Ollydbg\VB Decompiler Pro v11.5"
 set "PLUGIN_DIR=%VBDEC_DIR%\Plugins"
 
 set "CONFIG=Release"

@@ -78,7 +78,31 @@ static const char *log_level_tag(int level)
     }
 }
 
-void vbmcp_logf(int level, const char *fmt, ...)
+/* 日志文件轮转：单文件上限 10MB，超过则在进程内首次写入时改名 .old
+ * （只保留一代）。只在日志临界区内调用，checked 标志无需原子。 */
+static const unsigned long long kLogMaxBytes = 10ull * 1024 * 1024;
+
+static void rotate_log_if_needed(const char *path)
+{
+    static bool checked = false;
+    if (checked) return;
+    checked = true;
+
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) return;
+    const unsigned long long size =
+        ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    if (size < kLogMaxBytes) return;
+
+    char old_path[MAX_PATH + 8];
+    _snprintf_s(old_path, sizeof(old_path), _TRUNCATE, "%s.old", path);
+    DeleteFileA(old_path);
+    MoveFileA(path, old_path);
+}
+
+/* 日志核心（va_list 版本）：vbmcp_logf 与 vbmcp_log 共用同一实现，
+ * 避免两份几乎相同的代码各自维护环境变量解析与文件写序。 */
+static void log_write_va(int level, const char *fmt, va_list ap)
 {
     static int enabled = -1;   /* -1=未初始化 */
     static int threshold = VBMCP_LOG_INFO;
@@ -99,6 +123,8 @@ void vbmcp_logf(int level, const char *fmt, ...)
     if (n == 0 || n >= MAX_PATH) strcpy_s(path, MAX_PATH, ".");
     strcat_s(path, MAX_PATH, "\\vbmcp.log");
 
+    rotate_log_if_needed(path);
+
     FILE *f = NULL;
     if (fopen_s(&f, path, "ab") != 0 || !f) { log_unlock(); return; }
 
@@ -108,48 +134,28 @@ void vbmcp_logf(int level, const char *fmt, ...)
         st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
         log_level_tag(level));
 
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(f, fmt, args);
-    va_end(args);
+    vfprintf(f, fmt, ap);
 
     fprintf(f, "\n");
     fclose(f);
     log_unlock();
 }
 
+void vbmcp_logf(int level, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    log_write_va(level, fmt, ap);
+    va_end(ap);
+}
+
 /* 兼容旧调用点：等价于 vbmcp_logf(VBMCP_LOG_INFO, ...) */
 void vbmcp_log(const char *fmt, ...)
 {
-    static int enabled = -1;
-    log_lock();
-    if (enabled == -1) {
-        char envval[2] = "";
-        enabled = (GetEnvironmentVariableA("VBMCP_DEBUG_LOG", envval, 2) > 0) ? 1 : 0;
-    }
-    if (!enabled) { log_unlock(); return; }
-
-    char path[MAX_PATH];
-    DWORD n = GetEnvironmentVariableA("TEMP", path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) strcpy_s(path, MAX_PATH, ".");
-    strcat_s(path, MAX_PATH, "\\vbmcp.log");
-
-    FILE *f = NULL;
-    if (fopen_s(&f, path, "ab") != 0 || !f) { log_unlock(); return; }
-
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    fprintf(f, "[%02d:%02d:%02d.%03d] ",
-        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(f, fmt, args);
-    va_end(args);
-
-    fprintf(f, "\n");
-    fclose(f);
-    log_unlock();
+    va_list ap;
+    va_start(ap, fmt);
+    log_write_va(VBMCP_LOG_INFO, fmt, ap);
+    va_end(ap);
 }
 
 /* ============================================================
@@ -186,6 +192,44 @@ char *vbmcp_str_to_gbk(const char *src)
     vbmcp_free(wbuf);
     if (glen <= 0) { vbmcp_free(out); return vbmcp_strdup(src); }
     out[glen] = '\0';
+    return out;
+}
+
+/* ============================================================
+ * 通用 ANSI（GBK / CP_ACP）→ UTF-8 转换。
+ *
+ * VB Decompiler Callback Engine 返回 ANSI 字节，而 MCP 报文必须是
+ * UTF-8；工具层在把引擎文本放进 JSON 之前用本函数转换（默认 utf-8 模式）。
+ * 与 vbmcp_str_to_gbk 互为逆向：写入路径用后者把客户端 UTF-8 转回 ANSI。
+ *
+ * 返回 vbmcp_alloc 申请的新字符串（调用方 vbmcp_free）；
+ * ASCII 快速路径直接 strdup；转换失败回退 strdup(src)（乱码但不崩）。
+ * ============================================================ */
+char *vbmcp_acp_to_utf8(const char *src)
+{
+    if (!src) return NULL;
+    int all_ascii = 1;
+    for (const char *p = src; *p; p++) {
+        if ((unsigned char)*p >= 0x80) { all_ascii = 0; break; }
+    }
+    if (all_ascii) return vbmcp_strdup(src);
+
+    int wlen = MultiByteToWideChar(CP_ACP, 0, src, -1, NULL, 0);
+    if (wlen <= 0) return vbmcp_strdup(src);
+    wchar_t *wbuf = (wchar_t *)vbmcp_alloc((size_t)wlen * sizeof(wchar_t));
+    if (!wbuf) return vbmcp_strdup(src);
+    if (MultiByteToWideChar(CP_ACP, 0, src, -1, wbuf, wlen) <= 0) {
+        vbmcp_free(wbuf);
+        return vbmcp_strdup(src);
+    }
+
+    int ulen = WideCharToMultiByte(CP_UTF8, 0, wbuf, wlen - 1, NULL, 0, NULL, NULL);
+    if (ulen <= 0) { vbmcp_free(wbuf); return vbmcp_strdup(src); }
+    char *out = (char *)vbmcp_alloc((size_t)ulen + 1);
+    if (!out) { vbmcp_free(wbuf); return vbmcp_strdup(src); }
+    WideCharToMultiByte(CP_UTF8, 0, wbuf, wlen - 1, out, ulen, NULL, NULL);
+    out[ulen] = '\0';
+    vbmcp_free(wbuf);
     return out;
 }
 

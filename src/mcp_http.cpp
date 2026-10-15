@@ -55,6 +55,9 @@ constexpr int kSelectTimeoutMs  = 50;      /* 循环轮询间隔（同时保证�
 constexpr int kSseHeartbeatMs   = 15000;   /* SSE 保活注释帧间隔 */
 constexpr int kRateLimitPerSec  = 200;     /* 全局基础限流 */
 constexpr int kTaskQueueLimit   = VBMCP_MAX_PENDING_TASKS;
+/* 单连接待发缓冲上限：SSE 通知/心跳只追加不等待，客户端不读时必须有上限，
+ * 否则一个僵死连接就能把进程内存吃光。超限直接断开该连接。 */
+constexpr size_t kMaxSendBufferBytes = 4u * 1024 * 1024;
 
 /* ---------------- 绑定地址（UI 线程写，网络线程读） ---------------- */
 std::mutex  g_bind_mu;
@@ -81,6 +84,9 @@ struct UiTask {
     int               http_status = 200;
     std::atomic<bool> cancelled{ false };   /* 取消令牌（网络线程置位） */
     std::atomic<bool> done{ false };
+    /* 由 UI 线程在解析请求后回标：该请求是 initialize。
+     * 网络线程据此分配 Mcp-Session-Id —— 不再靠字符串搜索猜（见 handle_mcp_post）。 */
+    std::atomic<bool> is_initialize{ false };
     std::chrono::steady_clock::time_point enqueue;
 
     std::mutex              mtx;   /* 只用于"等待完成"，不保护上面字段 */
@@ -94,10 +100,10 @@ struct Connection {
     std::string   send_buf;
     std::size_t   send_off = 0;
     std::string   session_id;                 /* MCP 会话 id（initialize 分配） */
-    bool          session_id_pending = false; /* 需要在响应里回带会话 id */
     bool          close_after_send = false;
     bool          is_sse = false;
     bool          want_write = false;
+    bool          dead = false;               /* 主动断开标记（如 SSE 缓冲超限） */
     std::shared_ptr<UiTask> pending;
     std::chrono::steady_clock::time_point last_active;
 };
@@ -112,6 +118,10 @@ std::thread       g_net_thread;
 std::atomic<bool> g_net_running{ false };
 std::atomic<bool> g_net_inited{ false };
 std::atomic<bool> g_winsock_inited{ false };
+/* bind 完成（含失败）通知：vbmcp_server_start 等待它，替代 Sleep 忙等 */
+std::mutex              g_net_init_mu;
+std::condition_variable g_net_init_cv;
+std::atomic<bool>       g_net_init_done{ false };
 
 /* ---------------- tools/list_changed 广播暂存 ---------------- */
 std::mutex              g_list_changed_mu;
@@ -137,17 +147,39 @@ bool rate_limit_allow()
 
 /* ============================================================
  * 可信 CORS origin（绝不使用 "*"）
+ *
+ * 列表来自注册表 CorsOrigins，改成进程内缓存：origin_is_trusted 只在
+ * 网络线程调用，缓存也由网络线程独占读写（先写字符串、再置 loaded）。
+ * 失效：服务 stop/start 时由 UI 线程复位标志（此时网络线程已 join）。
  * ============================================================ */
+std::string       g_cors_list;
+std::atomic<bool> g_cors_loaded{ false };
+
+const std::string& cors_list_cached()
+{
+    if (!g_cors_loaded.load(std::memory_order_acquire)) {
+        char list[1024] = {0};
+        vbmcp_config_get_cors_origins(list, sizeof(list));
+        g_cors_list = list;
+        g_cors_loaded.store(true, std::memory_order_release);
+    }
+    return g_cors_list;
+}
+
+void cors_cache_invalidate()
+{
+    g_cors_loaded.store(false, std::memory_order_release);
+}
+
 bool origin_is_trusted(const std::string& origin)
 {
     if (origin.empty()) return false;
     if (_stricmp(origin.c_str(), "null") == 0) return false;
 
-    char list[1024] = {0};
-    vbmcp_config_get_cors_origins(list, sizeof(list));
-    if (!list[0]) return false;   /* 未配置可信列表 → 一律不发 CORS 头 */
+    const std::string& list = cors_list_cached();
+    if (list.empty()) return false;   /* 未配置可信列表 → 一律不发 CORS 头 */
 
-    const char* p = list;
+    const char* p = list.c_str();
     while (*p) {
         while (*p == ' ' || *p == '\t' || *p == ',') p++;
         const char* start = p;
@@ -343,6 +375,13 @@ void sse_begin(Connection* c, const std::string& origin)
 void sse_push_json(Connection* c, const std::string& json)
 {
     if (!c->is_sse) return;
+    if (c->send_buf.size() + json.size() > kMaxSendBufferBytes) {
+        vbmcp_logf(VBMCP_LOG_WARN,
+                   "sse send buffer overflow (%zu bytes pending), dropping client (client=%s)",
+                   c->send_buf.size(), c->peer.c_str());
+        c->dead = true;                 /* 主循环下一轮回收该连接 */
+        return;
+    }
     c->send_buf += "event: message\ndata: ";
     c->send_buf += json;
     c->send_buf += "\n\n";
@@ -358,6 +397,13 @@ void sse_heartbeat_all(std::vector<std::unique_ptr<Connection>>& conns)
         const auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - c->last_active).count();
         if (idle < kSseHeartbeatMs) continue;
+        if (c->send_buf.size() > kMaxSendBufferBytes) {
+            vbmcp_logf(VBMCP_LOG_WARN,
+                       "sse send buffer overflow (%zu bytes pending), dropping client (client=%s)",
+                       c->send_buf.size(), c->peer.c_str());
+            c->dead = true;
+            continue;
+        }
         c->send_buf += ": ping\n\n";
         c->want_write = true;
         c->last_active = now;
@@ -426,6 +472,9 @@ int parse_request(const std::string& buf, HttpRequest& out)
         return 0;
     }
     const std::size_t headers_len = hdr_end + 4;
+    /* 头部长度必须独立校验：只靠"未找到分隔符时"的检查会放过
+     * 一次到齐的超长头部（例如 1MB 头部 + 小 body 的单次 send）。 */
+    if (headers_len > (std::size_t)VBMCP_MAX_HEADER_SIZE) return -1;
     const std::string headers = buf.substr(0, headers_len);
 
     const std::size_t sp1 = headers.find(' ');
@@ -513,8 +562,10 @@ void task_pump_on_ui_thread()
         } else {
             /* MCP 请求入口 try-catch：任何 C++ 异常都不允许带崩 VB Decompiler UI */
             try {
+                int is_init = 0;
                 vbmcp::OwnedString resp(
-                    vbmcp_process_jsonrpc(task->body.c_str(), task->peer.c_str()));
+                    vbmcp_process_jsonrpc(task->body.c_str(), task->peer.c_str(), &is_init));
+                if (is_init) task->is_initialize.store(true);
                 if (!resp) {
                     task->http_status = 200;
                     task->response = json_error_document(VBMCP_ERR_INTERNAL, "out of memory");
@@ -582,9 +633,11 @@ std::string build_health_document()
     yyjson_mut_obj_add_strcpy(doc, inst, "name", fname);
     yyjson_mut_obj_add_strcpy(doc, inst, "arch", "Win32");
     yyjson_mut_obj_add_int(doc, inst, "bits", 32);
-    yyjson_mut_obj_add_strcpy(doc, inst, "path", exepath);
+    /* 非回环（局域网）监听时不暴露宿主绝对安装路径，只给文件名 */
+    const bool loopback = (vbmcp_bind_address() == VBMCP_LOOPBACK_BIND);
+    yyjson_mut_obj_add_strcpy(doc, inst, "path", loopback ? exepath : fname);
     yyjson_mut_obj_add_int(doc, inst, "pid", (long long)GetCurrentProcessId());
-    yyjson_mut_obj_add_bool(doc, inst, "local", vbmcp_bind_address() == VBMCP_LOOPBACK_BIND);
+    yyjson_mut_obj_add_bool(doc, inst, "local", loopback);
     yyjson_mut_obj_add_strcpy(doc, inst, "state", "ready");
     yyjson_mut_obj_add_bool(doc, inst, "readOnly", g_allow_write.load() == 0);
     yyjson_mut_obj_add_int(doc, inst, "tools_count",
@@ -667,11 +720,10 @@ void handle_mcp_post(Connection* c, const HttpRequest& req)
         return;
     }
 
-    /* initialize 成功后需要在响应里回带 Mcp-Session-Id（Streamable HTTP 规范） */
-    if (req.body.find("\"initialize\"") != std::string::npos && c->session_id.empty()) {
-        c->session_id = make_session_id();
-        c->session_id_pending = true;
-    }
+    /* 会话 id 不在这里分配：由 UI 线程执行完 initialize 后在任务对象上回标
+     * （task->is_initialize），网络线程在响应就绪时再分配并回带 Mcp-Session-Id
+     * （Streamable HTTP 规范）。这样无需解析请求体，也不会把含 "initialize"
+     * 字样的普通工具请求（例如写入含该词的代码）误判为 initialize。 */
     c->pending = task;
     g_session_was_used.store(true);
     vbmcp_logf(VBMCP_LOG_INFO, "tool task queued (%zu bytes, client=%s)",
@@ -712,7 +764,6 @@ void handle_request(Connection* c, const HttpRequest& req)
     if (req.method == "DELETE") {
         if (c->pending) c->pending->cancelled.store(true);
         c->session_id.clear();
-        c->session_id_pending = false;
         http_send_raw(c, 204, "text/plain", req.origin, "", "", false);
         vbmcp_logf(VBMCP_LOG_INFO, "session terminated by client (client=%s)", c->peer.c_str());
         return;
@@ -788,9 +839,11 @@ bool connection_poll_task(Connection* c, int timeout_ms)
 
     if (task->done.load()) {
         std::string extra;
-        if (c->session_id_pending && !c->session_id.empty()) {
+        /* initialize 成功 → 分配会话 id 并在本条响应里回带（规范要求）；
+         * 后续请求的校验见 handle_mcp_post（仅当本连接已持有 id 时比对）。 */
+        if (task->is_initialize.load()) {
+            if (c->session_id.empty()) c->session_id = make_session_id();
             extra = "Mcp-Session-Id: " + c->session_id;
-            c->session_id_pending = false;
         }
         c->pending.reset();
         if (task->http_status == 202 && task->response.empty()) {
@@ -881,6 +934,16 @@ vbmcp::SocketHandle create_listen_socket(const std::string& bind_addr, int port)
     return listener;
 }
 
+/* bind 结果就绪（成功或失败）→ 唤醒 vbmcp_server_start 的等待方 */
+void signal_net_init_done()
+{
+    {
+        std::lock_guard<std::mutex> lk(g_net_init_mu);
+        g_net_init_done.store(true);
+    }
+    g_net_init_cv.notify_all();
+}
+
 void network_thread_main()
 {
     const std::string bind_addr = vbmcp_bind_address();
@@ -891,9 +954,11 @@ void network_thread_main()
         vbmcp_logf(VBMCP_LOG_ERROR, "listen socket creation failed (%s:%d)",
                    bind_addr.c_str(), port);
         g_net_inited.store(false);
+        signal_net_init_done();
         return;
     }
     g_net_inited.store(true);
+    signal_net_init_done();
     vbmcp_logf(VBMCP_LOG_INFO, "MCP Streamable HTTP listening on %s:%d (thread=%lu)",
                bind_addr.c_str(), port, GetCurrentThreadId());
 
@@ -957,6 +1022,7 @@ void network_thread_main()
             }
             if (keep) keep = connection_poll_task(c, timeout_ms);
             if (keep && c->close_after_send && c->send_off >= c->send_buf.size()) keep = false;
+            if (keep && c->dead) keep = false;      /* SSE 缓冲超限等主动断开 */
 
             if (!keep) {
                 if (c->pending) {
@@ -1063,11 +1129,17 @@ int vbmcp_server_start()
         }
     }
 
+    g_net_init_done.store(false);
     g_net_running.store(true);
     g_net_thread = std::thread(network_thread_main);
 
-    for (int i = 0; i < 300 && !g_net_inited.load() && g_net_running.load(); ++i)
-        Sleep(10);
+    /* 等待 bind 结果：网络线程就绪后 notify（成功/失败都会），最多等 3 秒。
+     * 原来是 Sleep(10) 忙等，理论上会把 UI 线程按住 3 秒。 */
+    {
+        std::unique_lock<std::mutex> lk(g_net_init_mu);
+        g_net_init_cv.wait_for(lk, std::chrono::seconds(3),
+                               [] { return g_net_init_done.load(); });
+    }
 
     if (!g_net_inited.load()) {
         g_net_running.store(false);
@@ -1087,6 +1159,8 @@ void vbmcp_server_stop()
     if (g_net_running.exchange(false)) {
         if (g_net_thread.joinable()) g_net_thread.join();
     }
+    g_net_init_done.store(false);
+    cors_cache_invalidate();        /* 网络线程已 join：CORS 缓存失效，下次启动重读 */
     {
         std::lock_guard<std::mutex> lk(g_task_mu);
         for (auto& t : g_task_queue) t->cancelled.store(true);
@@ -1142,6 +1216,9 @@ int vbmcp_server_apply(int enable, int port)
 
 void vbmcp_notify_tools_list_changed()
 {
+    /* 服务未运行时不残留广播标志（否则下次启动的首个 SSE 连接会收到
+     * 一次无意义的 list_changed 通知）。 */
+    if (!vbmcp_server_is_running()) return;
     {
         std::lock_guard<std::mutex> lk(g_list_changed_mu);
         g_list_changed_payload =

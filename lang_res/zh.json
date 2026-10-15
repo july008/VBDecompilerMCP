@@ -63,7 +63,6 @@
     "Get the module/function coordinates of the currently active view (e.g. \"ModuleIndex,FunctionIndex\").": "获取当前激活视图的模块/函数坐标（如 \"ModuleIndex,FunctionIndex\"）。",
     "Set the text of VB Decompiler's bottom status bar (used to show MCP operation progress).": "设置VB Decompiler底栏状态栏文本（用于显示MCP操作进度）。",
     "Control decompilation options: the \"Parse stack parameters\" and \"Procedure analyzer and optimizer\" checkboxes. Omitting either parameter leaves the corresponding option unchanged.": "控制反编译选项：\"Parse stack parameters\"和\"Procedure analyzer and optimizer\"复选框。任一参数省略 → 不改变对应选项。",
-    "\\\"0\\\"=off \\\"1\\\"=on": "\\\"0\\\"=关 \\\"1\\\"=开",
     "List icons/images in the Form's FRX file: {count, icons:[{index,offset,size}]}. Supports pagination.": "列出 Form FRX 文件中的图标/图像：{count, icons:[{index,offset,size}]}。支持分页。",
     "Commit all Set modifications and refresh the GUI (tools normally call this automatically; call manually only after modifying large amounts of data externally).": "提交所有 Set 修改并刷新 GUI（一般工具内部已自动调用，仅在外部修改大量数据后需要时手动调用）。",
     "Write access is disabled. All vb_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings.": "写入权限未开启。只读模式下所有 vb_write_* 工具均不可用。请在 VB Decompiler MCP 设置中勾选\"允许 MCP 客户端写入项目数据\"。",
@@ -91,10 +90,11 @@
     "Add it directly in the client UI (no config file needed)": "请直接在客户端界面中添加（无需配置文件）",
     "Permissions and security": "权限与安全",
     "VB Decompiler MCP Server Help": "VB Decompiler MCP 服务器 帮助",
-    "Restored defaults": "已恢复默认设置",
     "Help": "帮助",
     "VB Decompiler MCP Server Plugin v%s\n\nThis plugin runs as an MCP (Model Context Protocol) server (Streamable HTTP),\nallowing AI clients to read/write VB Decompiler-decompiled code and internal\ndata via the JSON-RPC 2.0 interface.\n\nTools available: 28, split into two groups: vb_read_* (always available)\nand vb_write_* (only when \"Allow MCP client to write project data\" is\nenabled). The first tool call of each session asks for your confirmation.\n\nDebug log (when VBMCP_DEBUG_LOG=1):\n  %%TEMP%%\\vbmcp.log\n": "VB Decompiler MCP 服务器插件 v%s\n\n本插件以 MCP（Model Context Protocol）服务器方式运行（Streamable HTTP），\nAI 客户端可通过 JSON-RPC 2.0 接口读取/写入 VB Decompiler 反编译出的代码与内部数据。\n\n可用工具共 28 个，分两组：vb_read_*（始终可用）；\nvb_write_*（仅在勾选「允许 MCP 客户端写入项目数据」后可用）。\n每个会话的首次工具调用都会先请求你的确认。\n\n调试日志（需设置 VBMCP_DEBUG_LOG=1）：\n  %%TEMP%%\\vbmcp.log\n",
-    "Another request from this connection is still in flight; wait for its response before sending the next one.": null,
-    "Server busy: %d MCP tasks are already queued on the VB Decompiler UI thread (limit %d). The request was rejected to keep the UI responsive; retry in a moment.": null,
-    "Task timed out: the request waited longer than %d seconds for the VB Decompiler UI thread. The operation was cancelled; try again with a smaller scope (for example a single module or function).": null
+    "Another request from this connection is still in flight; wait for its response before sending the next one.": "本连接上还有一个请求尚未完成，请等待其响应后再发送下一个请求。",
+    "Server busy: %d MCP tasks are already queued on the VB Decompiler UI thread (limit %d). The request was rejected to keep the UI responsive; retry in a moment.": "服务器繁忙：VB Decompiler 界面线程上已排队的 MCP 任务达到 %d 个（上限 %d），为保证界面响应已拒绝本次请求，请稍后重试。",
+    "Task timed out: the request waited longer than %d seconds for the VB Decompiler UI thread. The operation was cancelled; try again with a smaller scope (for example a single module or function).": "任务超时：请求等待 VB Decompiler 界面线程超过 %d 秒，操作已取消。请缩小范围后重试（例如只读取单个模块或函数）。",
+    "\"0\"=off, \"1\"=on": "\"0\"=关, \"1\"=开",
+    "Encoding of text fields: \"utf-8\" (default) converts between the project's ANSI/GBK bytes and UTF-8; \"gbk\" returns/sends raw ANSI bytes (legacy behavior).": "文本字段编码：\"utf-8\"（默认）在工程的 ANSI/GBK 字节与 UTF-8 之间转换；\"gbk\" 直接返回/发送原始 ANSI 字节（旧行为）。"
 }

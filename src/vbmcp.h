@@ -157,8 +157,15 @@ HMODULE vbmcp_self_module(void);
 
 /* UTF-8 → ANSI(GBK) 转换：返回 vbmcp_alloc 的新串（调用方 vbmcp_free）。
  * i18n 里 `_()` 给 UTF-8、`_A()` 给 GBK；本函数用于转换"不在语言包内、
- * 但源码中是 UTF-8 字面量"的文本（如设置窗体内的客户端接入说明）。 */
+ * 但源码中是 UTF-8 字面量"的文本（如设置窗体内的客户端接入说明），
+ * 以及 MCP 写入工具把客户端 UTF-8 参数转回引擎需要的 ANSI 字节。 */
 char *vbmcp_str_to_gbk(const char *src);
+
+/* ANSI(GBK / CP_ACP) → UTF-8 转换：返回 vbmcp_alloc 的新串（调用方 vbmcp_free）。
+ * VB Decompiler 引擎返回 ANSI 字节，而 MCP 报文必须是 UTF-8；工具层
+ * （mcp_tools.cpp）在把引擎文本放进 JSON 之前用本函数转换（默认 utf-8 模式）。
+ * 与 vbmcp_str_to_gbk 互为逆向。 */
+char *vbmcp_acp_to_utf8(const char *src);
 
 /* ============================================================
  * 分级日志：写入 %TEMP%\vbmcp.log
@@ -174,7 +181,7 @@ char *vbmcp_str_to_gbk(const char *src);
 #define VBMCP_LOG_DEBUG 3
 
 void vbmcp_logf(int level, const char *fmt, ...);
-/* 兼容旧调用点：等价于 vbmcp_logf(VBMCP_LOG_INFO, ...) */
+/* 等价于 vbmcp_logf(VBMCP_LOG_INFO, ...)：元信息类日志的统一入口 */
 void vbmcp_log(const char *fmt, ...);
 
 /* ============================================================
@@ -284,11 +291,14 @@ int  vbmcp_server_is_running(void);
 int  vbmcp_server_apply(int enable, int port);
 
 /* 处理一个完整的 JSON-RPC 2.0 body，返回响应 JSON 字符串（new alloc）。
- *   client_info  客户端连接信息（如 "127.0.0.1:52341"），用于首次 callTool
- *                授权弹窗展示；可为 NULL。
+ *   client_info       客户端连接信息（如 "127.0.0.1:52341"），用于首次 callTool
+ *                     授权弹窗展示；可为 NULL。
+ *   out_is_initialize [out] 可为 NULL；请求是 initialize 时置 1
+ *                     （网络线程据此分配 Mcp-Session-Id）。
  * 返回 "" 表示 notification（应 202 空 body），返回 NULL 表示内存不足。
  * **必须在 UI 主线程调用**（会触发 VB Decompiler Callback Engine 与授权弹窗）。 */
-char *vbmcp_process_jsonrpc(const char *body, const char *client_info);
+char *vbmcp_process_jsonrpc(const char *body, const char *client_info,
+                            int *out_is_initialize);
 
 /* 权限（read/write 工具集）变化后广播 notifications/tools/list_changed，
  * 让已连接的 MCP 客户端自动重拉工具清单。由 UI 主线程调用。 */

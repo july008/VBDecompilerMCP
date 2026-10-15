@@ -43,11 +43,16 @@
 
 namespace {
 
-/* ---------------- 全局状态 ---------------- */
+/* ---------------- 全局状态 ----------------
+ * g_mode / g_trans 用原子发布：写方是 UI 线程（换语言 / 清空），
+ * 读方除 UI 线程外还包括 MCP 网络线程（mcp_http.cpp 在网络线程调用
+ * _F() 生成错误消息）。表本身"发布后不再改动"——旧表只退休不释放，
+ * 因此读者拿到的永远是一张完整的表，无需加锁。
+ * g_json / g_source 仅 UI 线程访问（外部无调用点），保持普通变量。 */
 std::atomic<bool>   g_shutting_down{ false };
 std::atomic<unsigned> g_generation{ 1 };   /* 表世代号：每次重建/清空自增 */
-I18nMode            g_mode = I18N_MODE_EN;
-khash_t            *g_trans = nullptr;
+std::atomic<I18nMode> g_mode{ I18N_MODE_EN };
+std::atomic<khash_t*> g_trans{ nullptr };
 yyjson_doc         *g_json = nullptr;
 std::string         g_source = "none";
 
@@ -132,7 +137,9 @@ static std::vector<yyjson_doc*> g_retired_docs;
 void clear_silent()
 {
     /* 只下线当前表，不释放：可能还有线程正在读它。真正释放见 I18n_Clear。 */
-    if (g_trans) { g_retired_maps.push_back(g_trans); g_trans = nullptr; }
+    if (khash_t *t = g_trans.exchange(nullptr, std::memory_order_acq_rel)) {
+        g_retired_maps.push_back(t);
+    }
     if (g_json)  { g_retired_docs.push_back(g_json);  g_json  = nullptr; }
     g_source = "none";
     g_generation.fetch_add(1);   /* 表换代：调用方据此刷新自己缓存的译文字面串 */
@@ -150,11 +157,10 @@ static void release_all_tables()
     g_retired_maps.clear();
     for (yyjson_doc *d : g_retired_docs) yyjson_doc_free(d);
     g_retired_docs.clear();
-    if (g_trans) {
+    if (khash_t *t = g_trans.exchange(nullptr)) {
         g_freed_pairs = 0;
-        kh_foreach(g_trans, free_pair, &g_freed_pairs);
-        kh_destroy(g_trans);
-        g_trans = nullptr;
+        kh_foreach(t, free_pair, &g_freed_pairs);
+        kh_destroy(t);
     }
     if (g_json) { yyjson_doc_free(g_json); g_json = nullptr; }
     g_source = "none";
@@ -227,8 +233,8 @@ bool build_table(yyjson_doc *doc)
     yyjson_val *root = doc ? yyjson_doc_get_root(doc) : nullptr;
     if (!yyjson_is_obj(root)) return false;
 
-    g_trans = kh_init_str(kh_str_hash_func, kh_str_hash_equal);
-    if (!g_trans) return false;
+    khash_t *table = kh_init_str(kh_str_hash_func, kh_str_hash_equal);
+    if (!table) return false;
 
     yyjson_obj_iter it = yyjson_obj_iter_with(root);
     yyjson_val *k, *v;
@@ -265,12 +271,14 @@ bool build_table(yyjson_doc *doc)
         }
 
         int ret = 0;
-        kh_put(g_trans, key, val, &ret);
+        kh_put(table, key, val, &ret);
         if (ret == 0) {          /* 极端情况：插入失败，避免泄漏 */
             vbmcp_free(key);
             vbmcp_free(val);
         }
     }
+    /* 表建好后再原子发布：读者要么看到旧表，要么看到完整新表。 */
+    g_trans.store(table, std::memory_order_release);
     return true;
 }
 
@@ -481,7 +489,7 @@ void I18n_Clear()
     /* 停机/卸载：确认没有读者了，把历任表一次性释放干净 */
     std::lock_guard<std::mutex> lock(g_table_mu);
     release_all_tables();
-    g_mode = I18N_LANG_EN;
+    g_mode.store(I18N_LANG_EN);
 }
 
 int I18n_SetMode(I18nMode mode)
@@ -489,7 +497,7 @@ int I18n_SetMode(I18nMode mode)
     /* 写路径串行：建表 + 发布期间不与另一次换语言交叉 */
     std::lock_guard<std::mutex> lock(g_table_mu);
     clear_silent();
-    g_mode = mode;
+    g_mode.store(mode);
 
     if (mode == I18N_LANG_EN) return 1;   /* 英文：_() 原样返回 msgid */
 
@@ -512,7 +520,7 @@ int I18n_SetMode(I18nMode mode)
                    "i18n: pack unavailable for '%s' (RCDATA '%s' not found), "
                    "using msgid (English)", I18n_LangName(mode), rsrc);
     }
-    g_mode = I18N_LANG_EN;
+    g_mode.store(I18N_LANG_EN);
     return 0;
 }
 
@@ -523,7 +531,7 @@ void I18n_Refresh()
     char env[64] = {0};
     if (GetEnvironmentVariableA("VBMCP_LANG", env, sizeof(env)) > 0) {
         const I18nLang want_env = I18n_LangFromName(env);
-        if (want_env != g_mode || (want_env != I18N_LANG_EN && !g_trans)) {
+        if (want_env != g_mode.load() || (want_env != I18N_LANG_EN && !g_trans.load())) {
             I18n_SetMode(want_env);
             vbmcp_logf(VBMCP_LOG_INFO, "i18n: language=%s (from VBMCP_LANG='%s')",
                        I18n_LangCode(I18n_GetMode()), env);
@@ -540,7 +548,7 @@ void I18n_Refresh()
     /* 未知/缺失的值一律当英文 */
     const I18nLang want = (st == ERROR_SUCCESS)
                               ? I18n_LangFromName(val) : I18N_LANG_EN;
-    if (want == g_mode && (want == I18N_LANG_EN || g_trans != nullptr)) {
+    if (want == g_mode.load() && (want == I18N_LANG_EN || g_trans.load() != nullptr)) {
         return;                       /* 未变化：不重复加载 */
     }
     I18n_SetMode(want);
@@ -551,14 +559,15 @@ void I18n_Refresh()
 
 I18nMode I18n_GetMode(void)
 {
-    return g_mode;
+    return g_mode.load();
 }
 
 int I18n_TranslatedCount(void)
 {
-    return (int)kh_size(g_trans);
+    return (int)kh_size(g_trans.load());
 }
 
+/* 仅 UI 线程调用（g_source 是普通字符串，不参与跨线程发布）。 */
 const char *I18n_LangPackSource(void)
 {
     return g_source.c_str();
@@ -573,11 +582,14 @@ const char *I18n_GetText(const char *msgid)
 {
     if (!msgid || !*msgid) return msgid ? msgid : "";
     if (g_shutting_down.load()) return msgid;
-    if (g_mode != I18N_LANG_EN && g_trans) {
+    if (g_mode.load(std::memory_order_relaxed) != I18N_LANG_EN) {
         /* 命中即返回：空串是"故意留空"的合法译文，不能当成未翻译。
          * 未翻译的条目在 build_table 里就没有进哈希表（值为 null），落到下面回退。 */
-        char *tr = (char *)kh_get(g_trans, msgid);
-        if (tr) return tr;
+        khash_t *table = g_trans.load(std::memory_order_acquire);
+        if (table) {
+            char *tr = (char *)kh_get(table, msgid);
+            if (tr) return tr;
+        }
     }
     return msgid;
 }

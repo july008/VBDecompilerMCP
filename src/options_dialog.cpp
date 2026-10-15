@@ -767,12 +767,18 @@ static int confirm_open_bind_warning(HWND hDlg, const char *bind)
 /* ============================================================
  * 状态 / 权限模式显示
  * ============================================================ */
+/* 「权限模式」标签：按界面勾选预览目标模式（点「确定」后才真正生效）。 */
+static void refresh_mode_label(void)
+{
+    const int allow_write = (get_check(IDC_CHK_ALLOW_WRITE) == BST_CHECKED);
+    set_text(IDC_LBL_MODE_VAL, allow_write ? _A("read-write") : _A("read-only"));
+}
+
 static void refresh_status(void)
 {
     const int running = vbmcp_server_is_running();
     set_text(IDC_LBL_STATUS, running ? _A("running") : _A("stopped"));
-    set_text(IDC_LBL_MODE_VAL,
-             g_allow_write.load() ? _A("read-write") : _A("read-only"));
+    refresh_mode_label();
 }
 
 /* ============================================================
@@ -1047,6 +1053,18 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
         /* 统一背景色：直接指定一个颜色（见"统一背景色"小节） */
         create_ui_bg_brush();
 
+        /* 资源编辑器保存 .rc 时会丢掉 WS_THICKFRAME（"Resizing" 属性未勾选），
+         * 使窗体变成不可拖拽缩放。这里在运行期补上，对编辑器重写免疫。 */
+        {
+            LONG_PTR style = GetWindowLongPtrA(hDlg, GWL_STYLE);
+            if (!(style & WS_THICKFRAME)) {
+                SetWindowLongPtrA(hDlg, GWL_STYLE, style | WS_THICKFRAME);
+                SetWindowPos(hDlg, NULL, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                             SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            }
+        }
+
         g_options_hwnd = hDlg;
         g_shell        = hDlg;
         g_dpi = GetDpiForWindowSafe(hDlg);
@@ -1147,7 +1165,17 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             return TRUE;
         }
 
+        /* 键盘 Esc 以 IDCANCEL(id=2) 发 WM_COMMAND；不处理会被下方兜底
+         * return TRUE 吞掉，导致 Esc 无法关窗（点标题栏 X 走 WM_CLOSE 正常）。 */
+        if (id == IDCANCEL) {
+            EndDialog(hDlg, IDCANCEL);
+            return TRUE;
+        }
+
         if (id == IDC_BTN_RESTORE) {
+            /* 只把界面重置为默认值（含权限模式标签预览），实际生效由
+             * 「确定」统一完成 —— 这样点「取消」仍可放弃本次修改，与窗体
+             * 其余控件语义一致（历史上这里会立即停服并写注册表）。 */
             set_check(IDC_CHK_ENABLE, 0);
             set_check(IDC_CHK_ALLOW_WRITE, 0);
             set_check(IDC_CHK_LAN_ADVANCED, 0);
@@ -1156,14 +1184,7 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             _snprintf_s(port_txt, sizeof(port_txt), _TRUNCATE, "%d", VBMCP_DEFAULT_PORT);
             set_text(IDC_EDIT_PORT, port_txt);
             set_text(IDC_TXT_BIND, VBMCP_DEFAULT_BIND);
-            g_enabled.store(0);
-            g_port.store(VBMCP_DEFAULT_PORT);
-            g_allow_write.store(VBMCP_DEFAULT_ALLOW_WRITE);
-            vbmcp_server_stop();
-            vbmcp_config_save(VBMCP_DEFAULT_PORT, VBMCP_DEFAULT_BIND,
-                              VBMCP_DEFAULT_ALLOW_WRITE);
-            vbmcp_log("%s", _("Restored defaults"));
-            refresh_status();
+            refresh_mode_label();
             update_access_page();
             return TRUE;
         }
@@ -1179,6 +1200,12 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (id == IDC_EDIT_PORT) {
             if (code == EN_CHANGE) update_access_page();
+            return TRUE;
+        }
+
+        if (id == IDC_CHK_ALLOW_WRITE) {
+            /* 「权限模式」显示的是界面勾选对应的目标模式（确定后才生效） */
+            refresh_mode_label();
             return TRUE;
         }
 

@@ -17,7 +17,7 @@
 *
 * UI 语言通过单独的子键读取（VB Decompiler 自己写入）：
 *   HKEY_CURRENT_USER\SOFTWARE\VB and VBA Program Settings\VB Decompiler\Options\CustomLanguage
-* 详见 lang.cpp。
+* 详见 i18n.cpp（I18N_LANG_REG_KEY / I18N_LANG_REG_VALUE）。
 *
 * 设计原则：
 *   - 不存在 / 字段缺失时返回默认值，不抛错。

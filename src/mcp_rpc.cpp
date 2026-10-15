@@ -164,17 +164,13 @@ static void add_initialize_result(yyjson_mut_doc *doc, yyjson_mut_val *root)
     yyjson_mut_val *result = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, result, "protocolVersion", VBMCP_PROTOCOL);
 
+    /* 只声明实际实现的能力。listChanged=1：写入权限变化时服务端会广播
+     * notifications/tools/list_changed（客户端仅在声明 true 时监听该通知）；
+     * prompts / resources 未实现，不再声明，避免客户端探测得到 -32601。 */
     yyjson_mut_val *caps = yyjson_mut_obj(doc);
     yyjson_mut_val *tools = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_bool(doc, tools, "listChanged", 0);
+    yyjson_mut_obj_add_bool(doc, tools, "listChanged", 1);
     yyjson_mut_obj_add_val(doc, caps, "tools", tools);
-    yyjson_mut_val *prompts = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_bool(doc, prompts, "listChanged", 0);
-    yyjson_mut_obj_add_val(doc, caps, "prompts", prompts);
-    yyjson_mut_val *res = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_bool(doc, res, "subscribe", 0);
-    yyjson_mut_obj_add_bool(doc, res, "listChanged", 0);
-    yyjson_mut_obj_add_val(doc, caps, "resources", res);
     yyjson_mut_obj_add_val(doc, result, "capabilities", caps);
 
     yyjson_mut_val *info = yyjson_mut_obj(doc);
@@ -187,7 +183,9 @@ static void add_initialize_result(yyjson_mut_doc *doc, yyjson_mut_val *root)
         "decompiled VB project. Read tools (vb_read_*) are always available; "
         "write tools (vb_write_*) require the user to enable write access in "
         "the plugin settings. Get info first, then list/get/set modules, forms, "
-        "functions.");
+        "functions. Text fields in tool results are UTF-8 by default; pass "
+        "encoding:\"gbk\" to a tool to receive/send the project's raw ANSI "
+        "bytes instead (legacy behavior, for code pages such as GBK).");
 
     yyjson_mut_obj_add_val(doc, root, "result", result);
 }
@@ -261,14 +259,16 @@ static void handle_tools_call(yyjson_mut_doc *doc, yyjson_mut_val *root,
 /* ============================================================
  * 主要入口
  * ============================================================ */
-static char *process_jsonrpc_impl(const char *body, const char *client_info);
+static char *process_jsonrpc_impl(const char *body, const char *client_info,
+                                  int *out_is_initialize);
 
-char *vbmcp_process_jsonrpc(const char *body, const char *client_info)
+char *vbmcp_process_jsonrpc(const char *body, const char *client_info,
+                            int *out_is_initialize)
 {
     /* 入口防御：任何 C++ 异常都必须转成 MCP 标准错误，
      * 绝不允许把 VB Decompiler UI 进程带崩（外层任务队列另有一层保护）。 */
     try {
-        return process_jsonrpc_impl(body, client_info);
+        return process_jsonrpc_impl(body, client_info, out_is_initialize);
     } catch (const std::exception &e) {
         vbmcp_logf(VBMCP_LOG_ERROR, "jsonrpc threw std::exception: %s", e.what());
     } catch (...) {
@@ -277,7 +277,8 @@ char *vbmcp_process_jsonrpc(const char *body, const char *client_info)
     return make_error_resp(NULL, VBMCP_ERR_INTERNAL, "Internal error");
 }
 
-static char *process_jsonrpc_impl(const char *body, const char *client_info)
+static char *process_jsonrpc_impl(const char *body, const char *client_info,
+                                  int *out_is_initialize)
 {
     if (!body || !*body)
         return make_error_resp(NULL, VBMCP_ERR_PARSE, "Parse error: empty body");
@@ -298,19 +299,18 @@ static char *process_jsonrpc_impl(const char *body, const char *client_info)
     yyjson_val *m = yyjson_obj_get(req, "method");
     const char *method = (m && yyjson_is_str(m)) ? yyjson_get_str(m) : NULL;
 
+    /* JSON-RPC 2.0：无 id 的请求（notification，含 notifications/* 全部方法
+     * 以及未来扩展通知）一律不产生响应体 —— HTTP 层回 202 空 body。
+     * 不再按方法名白名单，未知通知同样静默丢弃（绝不能给通知回错误对象）。 */
+    if (!idv) {
+        yyjson_doc_free(req_doc);
+        return vbmcp_strdup("");
+    }
+
     if (!method) {
         char *e = make_error_resp(idv, VBMCP_ERR_INVALID_REQUEST, "Missing method");
         yyjson_doc_free(req_doc);
         return e;
-    }
-
-    /* notification：不返回 JSON-RPC 响应（HTTP 层回 202 空 body）。 */
-    if (vb_streq(method, "notifications/initialized") ||
-        vb_streq(method, "notifications/cancelled") ||
-        vb_streq(method, "notifications/progress") ||
-        vb_streq(method, "notifications/roots/list_changed")) {
-        yyjson_doc_free(req_doc);
-        return vbmcp_strdup("");
     }
 
     yyjson_mut_val *root = NULL;
@@ -318,6 +318,7 @@ static char *process_jsonrpc_impl(const char *body, const char *client_info)
     if (!doc) { yyjson_doc_free(req_doc); return NULL; }
 
     if (vb_streq(method, "initialize")) {
+        if (out_is_initialize) *out_is_initialize = 1;   /* 网络线程据此分配会话 id */
         vbmcp_set_active_protocol_version(VBMCP_PROTOCOL);
         add_initialize_result(doc, root);
     }

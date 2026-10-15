@@ -7,25 +7,26 @@
  *      vb_write_*  修改操作（保存、修改工程、覆盖导出、删除/清空项目资源）
  *    只读模式下 listTools 只返回 vb_read_*；开启"允许写入"后才追加 vb_write_*。
  *  - 输入为 JSON 对象（arguments），输出为 JSON：**全部使用 yyjson** 构建/解析，
- *    删除全部手写 JSON 序列化代码。序列化统一带 YYJSON_WRITE_ALLOW_INVALID_UNICODE，
- *    因为 VB Decompiler 引擎返回 ANSI/GBK 字节（非合法 UTF-8）。
+ *    删除全部手写 JSON 序列化代码。
+ *  - 数据编码（见下方"数据编码"小节）：工具默认把引擎的 ANSI/GBK 字节转成
+ *    UTF-8 输出、把客户端 UTF-8 参数转回 ANSI/GBK 写入；可选参数 encoding:"gbk"
+ *    回退为旧的字节透传行为。含自由文本的结果附带 {"encoding": "..."} 字段。
  *  - 业务错误返回 {"error":"..."}（isError:true 的工具结果，占用 MCP 内容通道，
- *    不占用 JSON-RPC 错误通道）；权限/参数类错误由 dispatcher 用 VBMCP_ERR_* 分类。
+ *    不占用 JSON-RPC 错误通道）；权限/参数类错误经 out_err 由 dispatcher 分类。
+ *  - 错误分类不再走全局变量：每个 impl 通过 `int *out_err` 显式回填
+ *    VBMCP_ERR_*，由 mcp_dispatch_tool 上报给 rpc 层。
  *  - 所有工具实现都假定在主线程调用（避开 Callback Engine 线程安全问题）。
  */
-
 #include "mcp_tools.h"
 #include "vbmcp.h"
 #include "i18n.h"
 #include <stdio.h>
+#include <string>
+#include <vector>
 
 /* ============================================================
  * 结果构造辅助（yyjson）
  * ============================================================ */
-
-/* 单线程（VB Decompiler 主线程消息循环）下，记录最近一次工具调用的错误分类。
- * 由 err_json() 写入，dispatcher 读取后回填给调用方。 */
-static int g_tool_err = VBMCP_ERR_OK;
 
 /* 序列化并释放 mutable doc。失败时回退到一个合法的空对象。 */
 static char *doc_to_string(yyjson_mut_doc *doc)
@@ -51,10 +52,11 @@ static yyjson_mut_doc *new_obj_doc(yyjson_mut_val **root_out)
     return doc;
 }
 
-/* 业务/权限错误负载：{"error":"..."}，并记录错误分类供 dispatcher 读取。 */
-static char *err_json(int code, const char *msg)
+/* 业务/权限错误负载：{"error":"..."}；同时把错误分类写回 out_err
+ * （由 mcp_dispatch_tool 读取后上报给 rpc 层，取代旧的 g_tool_err 全局变量）。 */
+static char *err_json(int *out_err, int code, const char *msg)
 {
-    g_tool_err = code;
+    if (out_err) *out_err = code;
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
     if (!doc) return vbmcp_strdup("{\"error\":\"out of memory\"}");
@@ -62,14 +64,63 @@ static char *err_json(int code, const char *msg)
     return doc_to_string(doc);
 }
 
-/* 便捷：构造 {"<key>":"<text>"}（文本来自引擎，可能是 GBK 字节）。 */
-static char *one_str_field(const char *key, const char *text)
+/* ============================================================
+ * 数据编码（MCP JSON ↔ VB Decompiler 引擎）
+ *
+ * MCP 报文（JSON）必须是 UTF-8，而引擎的文本字段是 ANSI（中文 Windows = GBK）
+ * 字节。每个工具都接受可选参数 encoding：
+ *   "utf-8"（默认）：读侧 GBK→UTF-8、写侧 UTF-8→GBK（双向转换）；
+ *   "gbk"          ：旧行为——字节原样透传（兼容按 ANSI 处理数据的客户端）。
+ * 含自由文本的结果额外带 {"encoding": "..."} 字段，声明该结果的实际编码。
+ * ============================================================ */
+enum { ENC_UTF8 = 0, ENC_GBK = 1 };
+
+/* 引擎文本（ANSI/GBK）→ 结果文本：返回 new alloc（vbmcp_free）。 */
+static char *enc_out(const char *engine_text, int enc)
 {
-    yyjson_mut_val *root = NULL;
-    yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return vbmcp_strdup("{}");
-    yyjson_mut_obj_add_strcpy(doc, root, key, text ? text : "");
-    return doc_to_string(doc);
+    if (!engine_text) return NULL;
+    return (enc == ENC_GBK) ? vbmcp_strdup(engine_text)
+                            : vbmcp_acp_to_utf8(engine_text);
+}
+
+/* 客户端文本（UTF-8 JSON）→ 引擎文本（ANSI/GBK）：返回 new alloc（vbmcp_free）。 */
+static char *enc_in(const char *json_text, int enc)
+{
+    if (!json_text) return NULL;
+    return (enc == ENC_GBK) ? vbmcp_strdup(json_text)
+                            : vbmcp_str_to_gbk(json_text);
+}
+
+/* 把引擎文本按编码转换后写入对象的字符串字段。 */
+static void add_text(yyjson_mut_doc *doc, yyjson_mut_val *obj,
+                     const char *key, const char *engine_text, int enc)
+{
+    char *t = enc_out(engine_text, enc);
+    yyjson_mut_obj_add_strcpy(doc, obj, key, t ? t : "");
+    if (t) vbmcp_free(t);
+}
+
+/* 数组版本（表单名 / 模块名列表等）。 */
+static void arr_add_text(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                         const char *engine_text, int enc)
+{
+    char *t = enc_out(engine_text, enc);
+    yyjson_mut_arr_add_strcpy(doc, arr, t ? t : "");
+    if (t) vbmcp_free(t);
+}
+
+/* 含自由文本的结果：声明实际使用的编码（utf-8 / gbk），便于客户端判断。 */
+static void add_encoding_field(yyjson_mut_doc *doc, yyjson_mut_val *root, int enc)
+{
+    yyjson_mut_obj_add_strcpy(doc, root, "encoding", enc == ENC_GBK ? "gbk" : "utf-8");
+}
+
+/* 写工具：把客户端文本转成引擎字节并调用 vb_set_value（Set 语义见 vbdec_sdk.cpp）。 */
+static void set_text_value(int vlType, const char *json_text, int enc, int idx, int fn)
+{
+    char *ansi = enc_in(json_text, enc);
+    vb_set_value(vlType, ansi ? ansi : (json_text ? json_text : ""), idx, fn);
+    if (ansi) vbmcp_free(ansi);
 }
 
 /* ============================================================
@@ -97,6 +148,14 @@ static const char *arg_str(yyjson_val *args, const char *key)
 {
     yyjson_val *v = args ? yyjson_obj_get(args, key) : NULL;
     return (v && yyjson_is_str(v)) ? yyjson_get_str(v) : NULL;
+}
+
+/* 读取 encoding 参数：缺省 / "utf-8" → UTF-8 双向转换；"gbk" → 旧字节透传。 */
+static int arg_encoding(yyjson_val *args)
+{
+    const char *e = arg_str(args, "encoding");
+    if (e && _stricmp(e, "gbk") == 0) return ENC_GBK;
+    return ENC_UTF8;
 }
 
 /* Native 项目守护：rename_* / UpdateAll 在 native 项目上会触发 modal
@@ -165,17 +224,29 @@ static void read_paging(yyjson_val *args, long long *limit, long long *offset)
     *offset = o;
 }
 
+/* 单文本字段结果：{"<key>": "<text>"[, "encoding": "..."]}。 */
+static char *one_text_result(const char *key, const char *engine_text,
+                             int enc, int with_encoding)
+{
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return vbmcp_strdup("{}");
+    add_text(doc, root, key, engine_text, enc);
+    if (with_encoding) add_encoding_field(doc, root, enc);
+    return doc_to_string(doc);
+}
+
 /* ============================================================
  * 只读工具实现
  * ============================================================ */
 
 /* -------- vb_read_project_info -------- */
-static char *tool_read_project_info(yyjson_val *args)
+static char *tool_read_project_info(yyjson_val *args, int *out_err)
 {
-    (void)args;
+    const int enc = arg_encoding(args);
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
 
     char *file_name = vb_get_value(VB_GetFileName, 0, 0);
     char *dec_path  = vb_get_value(VB_GetVBDecompilerPath, 0, 0);
@@ -183,11 +254,11 @@ static char *tool_read_project_info(yyjson_val *args)
     char *compiler  = vb_get_value(VB_GetCompiler, 0, 0);
     char *packed    = vb_get_value(VB_IsPacked, 0, 0);
 
-    yyjson_mut_obj_add_strcpy(doc, root, "file_name", file_name ? file_name : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "vbmcp_path", dec_path ? dec_path : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "is_native", native ? native : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "compiler", compiler ? compiler : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "is_packed", packed ? packed : "");
+    add_text(doc, root, "file_name", file_name ? file_name : "", enc);
+    add_text(doc, root, "vbmcp_path", dec_path ? dec_path : "", enc);
+    add_text(doc, root, "is_native", native ? native : "", enc);
+    add_text(doc, root, "compiler", compiler ? compiler : "", enc);
+    add_text(doc, root, "is_packed", packed ? packed : "", enc);
 
     vbmcp_free(file_name);
     vbmcp_free(dec_path);
@@ -198,19 +269,20 @@ static char *tool_read_project_info(yyjson_val *args)
 }
 
 /* -------- vb_read_project_text -------- */
-static char *tool_read_project_text(yyjson_val *args)
+static char *tool_read_project_text(yyjson_val *args, int *out_err)
 {
-    (void)args;
+    const int enc = arg_encoding(args);
     char *text = vb_get_value(VB_GetVBProject, 0, 0);
-    if (!text) return err_json(VBMCP_ERR_BUSINESS, _("No project is currently open"));
-    char *r = one_str_field("project_text", text);
+    if (!text) return err_json(out_err, VBMCP_ERR_BUSINESS, _("No project is currently open"));
+    char *r = one_text_result("project_text", text, enc, 1);
     vbmcp_free(text);
     return r;
 }
 
 /* -------- vb_read_list_forms -------- */
-static char *tool_read_list_forms(yyjson_val *args)
+static char *tool_read_list_forms(yyjson_val *args, int *out_err)
 {
+    const int enc = arg_encoding(args);
     long long limit, offset;
     read_paging(args, &limit, &offset);
 
@@ -220,14 +292,14 @@ static char *tool_read_list_forms(yyjson_val *args)
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
         char *name = vb_get_value(VB_GetVBFormName, (int)i, 0);
-        yyjson_mut_arr_add_strcpy(doc, arr, name ? name : "");
+        arr_add_text(doc, arr, name ? name : "", enc);
         if (name) vbmcp_free(name);
     }
     apply_pagination(doc, root, "forms", arr, total, offset, limit);
@@ -235,23 +307,25 @@ static char *tool_read_list_forms(yyjson_val *args)
 }
 
 /* -------- vb_read_form -------- */
-static char *tool_read_form(yyjson_val *args)
+static char *tool_read_form(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "form_index", -1);
-    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
 
     char *content = vb_get_value(VB_GetVBForm, (int)idx, 0);
-    if (!content) return err_json(VBMCP_ERR_BUSINESS, _("Cannot read form content"));
+    if (!content) return err_json(out_err, VBMCP_ERR_BUSINESS, _("Cannot read form content"));
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) { vbmcp_free(content); return err_json(VBMCP_ERR_INTERNAL, _("Out of memory")); }
+    if (!doc) { vbmcp_free(content); return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory")); }
 
     char *name = vb_get_value(VB_GetVBFormName, (int)idx, 0);
     yyjson_mut_obj_add_int(doc, root, "form_index", idx);
-    yyjson_mut_obj_add_strcpy(doc, root, "form_name", name ? name : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "form_text", content);
+    add_text(doc, root, "form_name", name ? name : "", enc);
+    add_text(doc, root, "form_text", content, enc);
+    add_encoding_field(doc, root, enc);
     vbmcp_free(name);
     vbmcp_free(content);
     return doc_to_string(doc);
@@ -259,50 +333,74 @@ static char *tool_read_form(yyjson_val *args)
 
 /* -------- vb_read_list_modules --------
  * SDK 26 中 value=36 语义冲突（.h=SetModuleCount / .inc=GetModuleCount），
- * demo 全不使用。改用 GetModuleName(0..N) 探测到 NULL/空串确定总数。 */
+ * demo 全不使用。改用 GetModuleName(0..N) 探测到 NULL/空串确定总数。
+ * 探测结果加进程内缓存（见 get_module_names），避免每次 list 都全量调用引擎。 */
 #define VBMCP_MAX_MODULES 10000
-static char *tool_read_list_modules(yyjson_val *args)
+
+struct ModuleNameCache {
+    std::string              key;      /* 缓存键：项目文件名 + 写入世代 */
+    std::vector<std::string> names;
+    bool                     valid = false;
+};
+
+static ModuleNameCache g_module_cache;
+
+/* 每次写工具执行后自增：使模块名缓存失效（改名/写工程都可能改变列表） */
+static unsigned g_write_generation = 0;
+
+/* 探测并缓存模块名列表。返回的指针在下次失效前有效。 */
+static const std::vector<std::string> *get_module_names(void)
 {
+    char *fn = vb_get_value(VB_GetFileName, 0, 0);
+    std::string key = fn ? fn : "";
+    if (fn) vbmcp_free(fn);
+    key += '#';
+    key += std::to_string(g_write_generation);
+
+    if (!g_module_cache.valid || g_module_cache.key != key) {
+        g_module_cache.names.clear();
+        for (int i = 0; i < VBMCP_MAX_MODULES; i++) {
+            char *name = vb_get_value(VB_GetModuleName, i, 0);
+            if (!name || !*name) { if (name) vbmcp_free(name); break; }
+            g_module_cache.names.emplace_back(name);
+            vbmcp_free(name);
+        }
+        g_module_cache.key = key;
+        g_module_cache.valid = true;
+    }
+    return &g_module_cache.names;
+}
+
+static char *tool_read_list_modules(yyjson_val *args, int *out_err)
+{
+    const int enc = arg_encoding(args);
     long long limit, offset;
     read_paging(args, &limit, &offset);
 
-    char **names = (char **)vbmcp_alloc(VBMCP_MAX_MODULES * sizeof(char *));
-    if (!names) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
-    long long total = 0;
-    for (long long i = 0; i < VBMCP_MAX_MODULES; i++) {
-        char *name = vb_get_value(VB_GetModuleName, (int)i, 0);
-        if (!name || !*name) { if (name) vbmcp_free(name); break; }
-        names[i] = name;
-        total++;
-    }
+    const std::vector<std::string> *names = get_module_names();
+    const long long total = (long long)names->size();
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) {
-        for (long long i = 0; i < total; i++) vbmcp_free(names[i]);
-        vbmcp_free(names);
-        return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
-    }
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
-        yyjson_mut_arr_add_strcpy(doc, arr, names[i] ? names[i] : "");
+        arr_add_text(doc, arr, (*names)[(size_t)i].c_str(), enc);
     }
-    for (long long i = 0; i < total; i++) vbmcp_free(names[i]);
-    vbmcp_free(names);
-
     apply_pagination(doc, root, "modules", arr, total, offset, limit);
     return doc_to_string(doc);
 }
 
 /* -------- vb_read_module -------- */
-static char *tool_read_module(yyjson_val *args)
+static char *tool_read_module(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
-    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
 
     char *content = vb_get_value(VB_GetModule, (int)idx, 0);
     char *name    = vb_get_value(VB_GetModuleName, (int)idx, 0);
@@ -312,12 +410,13 @@ static char *tool_read_module(yyjson_val *args)
     yyjson_mut_doc *doc = new_obj_doc(&root);
     if (!doc) {
         vbmcp_free(content); vbmcp_free(name); vbmcp_free(str_ref);
-        return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+        return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     }
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
-    yyjson_mut_obj_add_strcpy(doc, root, "module_name", name ? name : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "declarations", content ? content : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "string_references", str_ref ? str_ref : "");
+    add_text(doc, root, "module_name", name ? name : "", enc);
+    add_text(doc, root, "declarations", content ? content : "", enc);
+    add_text(doc, root, "string_references", str_ref ? str_ref : "", enc);
+    add_encoding_field(doc, root, enc);
 
     vbmcp_free(content);
     vbmcp_free(name);
@@ -326,11 +425,12 @@ static char *tool_read_module(yyjson_val *args)
 }
 
 /* -------- vb_read_list_module_functions -------- */
-static char *tool_read_list_module_functions(yyjson_val *args)
+static char *tool_read_list_module_functions(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
-    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
 
     long long limit, offset;
     read_paging(args, &limit, &offset);
@@ -341,7 +441,7 @@ static char *tool_read_list_module_functions(yyjson_val *args)
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
@@ -352,8 +452,8 @@ static char *tool_read_list_module_functions(yyjson_val *args)
         char *addr = vb_get_value(VB_GetModuleFunctionAddress, (int)idx, (int)i);
         yyjson_mut_val *item = yyjson_mut_arr_add_obj(doc, arr);
         if (item) {
-            yyjson_mut_obj_add_strcpy(doc, item, "name", name ? name : "");
-            yyjson_mut_obj_add_strcpy(doc, item, "address", addr ? addr : "");
+            add_text(doc, item, "name", name ? name : "", enc);
+            add_text(doc, item, "address", addr ? addr : "", enc);
             yyjson_mut_obj_add_int(doc, item, "index", i);
         }
         if (name) vbmcp_free(name);
@@ -364,12 +464,13 @@ static char *tool_read_list_module_functions(yyjson_val *args)
 }
 
 /* -------- vb_read_function -------- */
-static char *tool_read_function(yyjson_val *args)
+static char *tool_read_function(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int midx = arg_index(args, "module_index", -1);
     int fidx = arg_index(args, "function_index", -1);
-    if (midx < 0 || fidx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
 
     char *name      = vb_get_value(VB_GetModuleFunctionName, (int)midx, (int)fidx);
     char *addr      = vb_get_value(VB_GetModuleFunctionAddress, (int)midx, (int)fidx);
@@ -383,16 +484,17 @@ static char *tool_read_function(yyjson_val *args)
     if (!doc) {
         vbmcp_free(name); vbmcp_free(addr); vbmcp_free(code);
         vbmcp_free(code_fast); vbmcp_free(str_ref); vbmcp_free(disasm);
-        return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+        return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     }
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
     yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
-    yyjson_mut_obj_add_strcpy(doc, root, "name", name ? name : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "address", addr ? addr : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "code", code ? code : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "code_fast", code_fast ? code_fast : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "string_references", str_ref ? str_ref : "");
-    yyjson_mut_obj_add_strcpy(doc, root, "disassembly", disasm ? disasm : "");
+    add_text(doc, root, "name", name ? name : "", enc);
+    add_text(doc, root, "address", addr ? addr : "", enc);
+    add_text(doc, root, "code", code ? code : "", enc);
+    add_text(doc, root, "code_fast", code_fast ? code_fast : "", enc);
+    add_text(doc, root, "string_references", str_ref ? str_ref : "", enc);
+    add_text(doc, root, "disassembly", disasm ? disasm : "", enc);
+    add_encoding_field(doc, root, enc);
 
     vbmcp_free(name);
     vbmcp_free(addr);
@@ -404,48 +506,53 @@ static char *tool_read_function(yyjson_val *args)
 }
 
 /* -------- vb_read_sub_main -------- */
-static char *tool_read_sub_main(yyjson_val *args)
+static char *tool_read_sub_main(yyjson_val *args, int *out_err)
 {
-    (void)args;
+    (void)out_err;
+    const int enc = arg_encoding(args);
     char *code = vb_get_value(VB_GetSubMain, 0, 0);
-    char *r = one_str_field("code", code ? code : "");
+    char *r = one_text_result("code", code ? code : "", enc, 1);
     if (code) vbmcp_free(code);
     return r;
 }
 
 /* -------- vb_read_active_text -------- */
-static char *tool_read_active_text(yyjson_val *args)
+static char *tool_read_active_text(yyjson_val *args, int *out_err)
 {
-    (void)args;
+    (void)out_err;
+    const int enc = arg_encoding(args);
     char *text = vb_get_value(VB_GetActiveText, 0, 0);
-    char *r = one_str_field("text", text ? text : "");
+    char *r = one_text_result("text", text ? text : "", enc, 1);
     if (text) vbmcp_free(text);
     return r;
 }
 
 /* -------- vb_read_active_disasm_text -------- */
-static char *tool_read_active_disasm_text(yyjson_val *args)
+static char *tool_read_active_disasm_text(yyjson_val *args, int *out_err)
 {
-    (void)args;
+    (void)out_err;
+    const int enc = arg_encoding(args);
     char *text = vb_get_value(VB_GetActiveDisasmText, 0, 0);
-    char *r = one_str_field("text", text ? text : "");
+    char *r = one_text_result("text", text ? text : "", enc, 1);
     if (text) vbmcp_free(text);
     return r;
 }
 
 /* -------- vb_read_active_coords -------- */
-static char *tool_read_active_coords(yyjson_val *args)
+static char *tool_read_active_coords(yyjson_val *args, int *out_err)
 {
-    (void)args;
+    (void)out_err;
+    const int enc = arg_encoding(args);
     char *s = vb_get_value(VB_GetActiveModuleCoordinats, 0, 0);
-    char *r = one_str_field("coordinates", s ? s : "");
+    char *r = one_text_result("coordinates", s ? s : "", enc, 0);
     if (s) vbmcp_free(s);
     return r;
 }
 
 /* -------- vb_read_list_frx_icons -------- */
-static char *tool_read_list_frx_icons(yyjson_val *args)
+static char *tool_read_list_frx_icons(yyjson_val *args, int *out_err)
 {
+    const int enc = arg_encoding(args);
     long long limit, offset;
     read_paging(args, &limit, &offset);
 
@@ -455,7 +562,7 @@ static char *tool_read_list_frx_icons(yyjson_val *args)
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
@@ -466,8 +573,8 @@ static char *tool_read_list_frx_icons(yyjson_val *args)
         yyjson_mut_val *item = yyjson_mut_arr_add_obj(doc, arr);
         if (item) {
             yyjson_mut_obj_add_int(doc, item, "index", i);
-            yyjson_mut_obj_add_strcpy(doc, item, "offset", off ? off : "");
-            yyjson_mut_obj_add_strcpy(doc, item, "size", size ? size : "");
+            add_text(doc, item, "offset", off ? off : "", enc);
+            add_text(doc, item, "size", size ? size : "", enc);
         }
         if (off) vbmcp_free(off);
         if (size) vbmcp_free(size);
@@ -481,56 +588,58 @@ static char *tool_read_list_frx_icons(yyjson_val *args)
  * ============================================================ */
 
 /* -------- vb_write_project_text -------- */
-static char *tool_write_project_text(yyjson_val *args)
+static char *tool_write_project_text(yyjson_val *args, int *out_err)
 {
+    const int enc = arg_encoding(args);
     const char *text = arg_str(args, "project_text");
-    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing required parameter: project_text"));
+    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing required parameter: project_text"));
 
     size_t text_len = strlen(text);
     if (text_len > VBMCP_MAX_PROJECT_TEXT) {
-        return err_json(VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
             _F("project_text exceeds the 16MB limit (actual %zu bytes); please write it in chunks",
                text_len));
     }
 
-    vb_set_value(VB_SetVBProject, text, 0, 0);
+    set_text_value(VB_SetVBProject, text, enc, 0, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)text_len);
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_clear_buffers -------- */
-static char *tool_write_clear_buffers(yyjson_val *args)
+static char *tool_write_clear_buffers(yyjson_val *args, int *out_err)
 {
     (void)args;
     vb_set_value(VB_ClearAllBuffers, "", 0, 0);
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_form -------- */
-static char *tool_write_form(yyjson_val *args)
+static char *tool_write_form(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "form_index", -1);
     const char *text = arg_str(args, "form_text");
-    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
-    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing form_text"));
+    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing form_text"));
 
-    vb_set_value(VB_SetVBForm, text, (int)idx, 0);
+    set_text_value(VB_SetVBForm, text, enc, (int)idx, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "form_index", idx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
@@ -538,42 +647,45 @@ static char *tool_write_form(yyjson_val *args)
 }
 
 /* -------- vb_write_rename_form -------- */
-static char *tool_write_rename_form(yyjson_val *args)
+static char *tool_write_rename_form(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "form_index", -1);
     const char *new_name = arg_str(args, "new_name");
-    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
-    if (!new_name) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
-    if (is_native_project()) return err_json(VBMCP_ERR_BUSINESS, _("rename_form is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
+    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (!new_name) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if (is_native_project()) return err_json(out_err, VBMCP_ERR_BUSINESS, _("rename_form is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
 
-    vb_set_value(VB_SetVBFormName, new_name, (int)idx, 0);
+    set_text_value(VB_SetVBFormName, new_name, enc, (int)idx, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "form_index", idx);
+    /* 回显客户端原文（UTF-8），不回显引擎侧转换结果 */
     yyjson_mut_obj_add_strcpy(doc, root, "new_name", new_name);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_module -------- */
-static char *tool_write_module(yyjson_val *args)
+static char *tool_write_module(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
     const char *decl = arg_str(args, "declarations");
-    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
-    if (!decl) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing declarations"));
+    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (!decl) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing declarations"));
 
-    vb_set_value(VB_SetModule, decl, (int)idx, 0);
+    set_text_value(VB_SetModule, decl, enc, (int)idx, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(decl));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
@@ -581,41 +693,43 @@ static char *tool_write_module(yyjson_val *args)
 }
 
 /* -------- vb_write_module_string_references -------- */
-static char *tool_write_module_string_references(yyjson_val *args)
+static char *tool_write_module_string_references(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
     const char *refs = arg_str(args, "string_references");
-    if (idx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
-    if (!refs) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing string_references"));
+    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (!refs) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing string_references"));
 
-    vb_set_value(VB_SetModuleStringReferences, refs, (int)idx, 0);
+    set_text_value(VB_SetModuleStringReferences, refs, enc, (int)idx, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_function -------- */
-static char *tool_write_function(yyjson_val *args)
+static char *tool_write_function(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int midx = arg_index(args, "module_index", -1);
     int fidx = arg_index(args, "function_index", -1);
     const char *code = arg_str(args, "code");
-    if (midx < 0 || fidx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
-    if (!code) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
+    if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (!code) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
 
-    vb_set_value(VB_SetModuleFunction, code, (int)midx, (int)fidx);
+    set_text_value(VB_SetModuleFunction, code, enc, (int)midx, (int)fidx);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
     yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
@@ -624,114 +738,120 @@ static char *tool_write_function(yyjson_val *args)
 }
 
 /* -------- vb_write_rename_function -------- */
-static char *tool_write_rename_function(yyjson_val *args)
+static char *tool_write_rename_function(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int midx = arg_index(args, "module_index", -1);
     int fidx = arg_index(args, "function_index", -1);
     const char *new_name = arg_str(args, "new_name");
-    if (midx < 0 || fidx < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
-    if (!new_name) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
-    if (is_native_project()) return err_json(VBMCP_ERR_BUSINESS, _("rename_function is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
+    if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (!new_name) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if (is_native_project()) return err_json(out_err, VBMCP_ERR_BUSINESS, _("rename_function is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
 
-    vb_set_value(VB_SetModuleFunctionName, new_name, (int)midx, (int)fidx);
+    set_text_value(VB_SetModuleFunctionName, new_name, enc, (int)midx, (int)fidx);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
     yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
+    /* 回显客户端原文（UTF-8），不回显引擎侧转换结果 */
     yyjson_mut_obj_add_strcpy(doc, root, "new_name", new_name);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_sub_main -------- */
-static char *tool_write_sub_main(yyjson_val *args)
+static char *tool_write_sub_main(yyjson_val *args, int *out_err)
 {
+    const int enc = arg_encoding(args);
     const char *code = arg_str(args, "code");
-    if (!code) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
+    if (!code) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
 
-    vb_set_value(VB_SetSubMain, code, 0, 0);
+    set_text_value(VB_SetSubMain, code, enc, 0, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_active_text -------- */
-static char *tool_write_active_text(yyjson_val *args)
+static char *tool_write_active_text(yyjson_val *args, int *out_err)
 {
+    const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
-    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
-    vb_set_value(VB_SetActiveText, text, 0, 0);
+    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    set_text_value(VB_SetActiveText, text, enc, 0, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_active_disasm_text -------- */
-static char *tool_write_active_disasm_text(yyjson_val *args)
+static char *tool_write_active_disasm_text(yyjson_val *args, int *out_err)
 {
+    const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
-    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
-    vb_set_value(VB_SetActiveDisasmText, text, 0, 0);
+    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    set_text_value(VB_SetActiveDisasmText, text, enc, 0, 0);
     vb_set_value(VB_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_goto_line -------- */
-static char *tool_write_goto_line(yyjson_val *args)
+static char *tool_write_goto_line(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int line = arg_index(args, "line", -1);
-    if (line < 0) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid line"));
+    if (line < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid line"));
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "%d", line);
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%d", line);
     vb_set_value(VB_SetActiveTextLine, buf, 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "line", line);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_status -------- */
-static char *tool_write_status(yyjson_val *args)
+static char *tool_write_status(yyjson_val *args, int *out_err)
 {
+    const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
-    if (!text) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
-    vb_set_status(text);
+    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    set_text_value(VB_SetStatusBarText, text, enc, 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
 /* -------- vb_write_options -------- */
-static char *tool_write_options(yyjson_val *args)
+static char *tool_write_options(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     const char *stack    = arg_str(args, "stack_check");
     const char *analyzer = arg_str(args, "analyzer_check");
     if (stack)    vb_set_value(VB_SetStackCheckBoxValue, stack, 0, 0);
@@ -740,7 +860,7 @@ static char *tool_write_options(yyjson_val *args)
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     if (stack)    yyjson_mut_obj_add_strcpy(doc, root, "stack_check", stack);
     if (analyzer) yyjson_mut_obj_add_strcpy(doc, root, "analyzer_check", analyzer);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
@@ -748,13 +868,13 @@ static char *tool_write_options(yyjson_val *args)
 }
 
 /* -------- vb_write_update_all -------- */
-static char *tool_write_update_all(yyjson_val *args)
+static char *tool_write_update_all(yyjson_val *args, int *out_err)
 {
     (void)args;
     vb_set_value(VB_UpdateAll, "", 0, 0);
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
@@ -763,7 +883,7 @@ static char *tool_write_update_all(yyjson_val *args)
  * 工具表 + 分发
  * ============================================================ */
 
-typedef char *(*tool_impl_fn)(yyjson_val *args);
+typedef char *(*tool_impl_fn)(yyjson_val *args, int *out_err);
 
 typedef struct {
     const char *name;
@@ -845,7 +965,6 @@ static const tool_entry_t *find_tool(const char *name)
     return NULL;
 }
 
-
 int mcp_tool_is_write(const char *tool_name)
 {
     const tool_entry_t *e = find_tool(tool_name);
@@ -870,28 +989,21 @@ int mcp_local_tool_count(int allow_write)
 char *mcp_dispatch_tool(const char *tool_name, yyjson_val *args,
                         int allow_write, int *out_error_code)
 {
-    g_tool_err = VBMCP_ERR_OK;
     if (out_error_code) *out_error_code = VBMCP_ERR_OK;
 
     if (!tool_name || !*tool_name) {
-        char *r = err_json(VBMCP_ERR_INVALID_PARAMS, _("Tool name is empty"));
-        if (out_error_code) *out_error_code = g_tool_err;
-        return r;
+        return err_json(out_error_code, VBMCP_ERR_INVALID_PARAMS, _("Tool name is empty"));
     }
 
     const tool_entry_t *e = find_tool(tool_name);
     if (!e) {
-        char *r = err_json(VBMCP_ERR_INVALID_PARAMS, _F("Unknown tool: %s", tool_name));
-        if (out_error_code) *out_error_code = g_tool_err;
-        return r;
+        return err_json(out_error_code, VBMCP_ERR_INVALID_PARAMS, _F("Unknown tool: %s", tool_name));
     }
 
     /* 防御兜底：只读模式下即便客户端绕过 listTools 强行调用 vb_write_*，
      * 也在此二次校验权限，直接返回 MCP 权限错误，不执行业务。 */
     if (e->is_write && !allow_write) {
-        char *r = err_json(VBMCP_ERR_PERMISSION, _("Write access is disabled. All vb_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings."));
-        if (out_error_code) *out_error_code = g_tool_err;
-        return r;
+        return err_json(out_error_code, VBMCP_ERR_PERMISSION, _("Write access is disabled. All vb_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings."));
     }
 
     /* 集中项目加载检查 */
@@ -900,15 +1012,16 @@ char *mcp_dispatch_tool(const char *tool_name, yyjson_val *args,
         if (vb_streq(tool_name, k_no_project_check[j])) { needs_check = 0; break; }
     }
     if (needs_check && !vb_is_project_loaded()) {
-        char *r = err_json(VBMCP_ERR_BUSINESS,
+        return err_json(out_error_code, VBMCP_ERR_BUSINESS,
             _F("Project not loaded. The VB SDK provides no ReloadFile/Refresh API, so vbmcp cannot re-initialize the engine from the DLL side. Please open the vbmcp settings window from the Plugins menu in the VB Decompiler main window and click OK (this triggers a VBDecompilerPluginLoad re-entry). Tool called: %s",
                tool_name));
-        if (out_error_code) *out_error_code = g_tool_err;
-        return r;
     }
 
-    char *payload = e->impl(args);
-    if (out_error_code) *out_error_code = g_tool_err;
+    int err = VBMCP_ERR_OK;
+    char *payload = e->impl(args, &err);
+    /* 写操作可能改变模块/表单/函数列表：使模块名缓存失效 */
+    if (e->is_write) g_write_generation++;
+    if (out_error_code) *out_error_code = err;
     return payload;
 }
 
@@ -949,12 +1062,27 @@ static void param_onoff(yyjson_mut_doc *doc, yyjson_mut_val *props, const char *
     yyjson_mut_arr_add_strcpy(doc, en, "0");
     yyjson_mut_arr_add_strcpy(doc, en, "1");
     yyjson_mut_obj_add_val(doc, o, "enum", en);
-    yyjson_mut_obj_add_strcpy(doc, o, "description", _("\\\"0\\\"=off \\\"1\\\"=on"));
+    yyjson_mut_obj_add_strcpy(doc, o, "description", _("\"0\"=off, \"1\"=on"));
     yyjson_mut_obj_add_val(doc, props, name, o);
+}
+
+/* 所有工具统一接受的可选 encoding 参数（见文件头"数据编码"小节）。 */
+static void param_encoding(yyjson_mut_doc *doc, yyjson_mut_val *props)
+{
+    yyjson_mut_val *o = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, o, "type", "string");
+    yyjson_mut_val *en = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_strcpy(doc, en, "utf-8");
+    yyjson_mut_arr_add_strcpy(doc, en, "gbk");
+    yyjson_mut_obj_add_val(doc, o, "enum", en);
+    yyjson_mut_obj_add_strcpy(doc, o, "description",
+        _("Encoding of text fields: \"utf-8\" (default) converts between the project's ANSI/GBK bytes and UTF-8; \"gbk\" returns/sends raw ANSI bytes (legacy behavior)."));
+    yyjson_mut_obj_add_val(doc, props, "encoding", o);
 }
 
 static void add_params(yyjson_mut_doc *doc, yyjson_mut_val *props, unsigned flags)
 {
+    param_encoding(doc, props);
     if (flags & P_PAGING) {
         param_int(doc, props, "limit",  1, 10000, 100, _("Maximum number of items to return"));
         param_int(doc, props, "offset", 0, 0,      0, _("Start offset"));
@@ -1023,16 +1151,4 @@ void mcp_build_tools_into(yyjson_mut_doc *doc, yyjson_mut_val *arr, int allow_wr
         if (g_tools[i].is_write && !allow_write) continue;
         build_one_tool(doc, arr, &g_tools[i]);
     }
-}
-
-/* 独立返回 {"tools":[...]} 字符串（new alloc）。 */
-char *mcp_build_tools_schema(int allow_write)
-{
-    yyjson_mut_val *root = NULL;
-    yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return vbmcp_strdup("{\"tools\":[]}");
-    yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    yyjson_mut_obj_add_val(doc, root, "tools", arr);
-    mcp_build_tools_into(doc, arr, allow_write);
-    return doc_to_string(doc);
 }
