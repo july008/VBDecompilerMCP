@@ -1,4 +1,4 @@
-# vbmcp 优化方案（已实施 · 2026-10-15）
+# vbdmcp 优化方案（已实施 · 2026-10-15）
 
 > 状态：**已实施（2026-10-15）**。用户决议：全部实施（P0–P4），且工具输出统一 UTF-8。
 > 逐项实施结果与验证见文末「决议与实施对照」与「实施记录」；
@@ -14,8 +14,8 @@
 
 | 类型 | 内容 |
 |---|---|
-| 源码 | `src/*.cpp`（9 个）、`src/*.h/.hpp`（5 个）、`src/vbmcp.def` |
-| 资源 | `res/vbmcp.rc`、`res/resource.h`、`vbmcp.vcxproj` |
+| 源码 | `src/*.cpp`（9 个）、`src/*.h/.hpp`（5 个）、`src/vbdmcp.def` |
+| 资源 | `res/vbdmcp.rc`、`res/resource.h`、`vbdmcp.vcxproj` |
 | 脚本/配套 | `build.bat`、`.gitignore`、`.gitmodules`、`tools/*`、`lang_res/zh.json` |
 | 文档 | `README.md`、`README_EN.md`、`SECURITY.md`、`docs/DEVELOPMENT.md`、`docs/REFACTOR_PROGRESS.md` |
 
@@ -24,8 +24,8 @@
 | 检查 | 结果 |
 |---|---|
 | `python tools/extract_i18n.py --check` | 98 条 msgid；zh 已译 95 / 待译 3 / 多余 0 / 缺失 0；16 项单元测试通过 |
-| `python tools/gen_ids_header.py --check` | 34 个 ID 与 `src/vbmcp_ids.h` 同步 |
-| `dumpbin /exports Win32\Release\vbmcp.dll` | 3 个导出名未修饰（`VBDecompilerPluginName/Author/Load`），以别名映射到 C++ 修饰名，宿主 GetProcAddress 正常 |
+| `python tools/gen_ids_header.py --check` | 34 个 ID 与 `src/vbdmcp_ids.h` 同步 |
+| `dumpbin /exports Win32\Release\vbdmcp.dll` | 3 个导出名未修饰（`VBDecompilerPluginName/Author/Load`），以别名映射到 C++ 修饰名，宿主 GetProcAddress 正常 |
 
 **未覆盖项**（后续需实测）：无法在真实 VB Decompiler 宿主 + 真实 MCP 客户端下运行，因此涉及「客户端实际收到的报文内容」「引擎编码行为」的结论标注为**待实测**。
 
@@ -39,7 +39,7 @@
 
 #### P0-1 `.gitignore` 把整个 `tools/` 忽略，工具链处于「不入库」状态
 
-- **证据**：`.gitignore` 含 `tools/`（整目录）与重复两行的 `Win32/`；`git status` 显示 `lang_res/`、`docs/`、`SECURITY.md`、`src/i18n.{h,cpp}`、`src/khash.h`、`src/vbmcp_ids.h`、`src/vbmcp_mem.hpp`、`.gitignore` 本身均未跟踪。
+- **证据**：`.gitignore` 含 `tools/`（整目录）与重复两行的 `Win32/`；`git status` 显示 `lang_res/`、`docs/`、`SECURITY.md`、`src/i18n.{h,cpp}`、`src/khash.h`、`src/vbdmcp_ids.h`、`src/vbdmcp_mem.hpp`、`.gitignore` 本身均未跟踪。
 - **影响**：`tools/extract_i18n.py`（98 词条提取/同步/校验）、`tools/gen_ids_header.py`（ID 生成校验）、`tools/ui_preview`（UI 回归截图）、`verify_i18n_resource.ps1` 只存在于本机磁盘。任何人重新检出仓库后，**无法同步语言包、无法校验 ID、无法做 UI 回归**，且 README/DEVELOPMENT 中描述的流程全部失效。
 - **建议**：
   1. 改为「忽略产物、保留脚本」：
@@ -57,7 +57,7 @@
      tools/**/Release/
      lang_res/untranslated*.txt
      ```
-  2. `git rm --cached -r Win32`（`Win32/Release/vbmcp.dll` 目前仍被跟踪，`Win32/` 已写入 ignore 但对已跟踪文件无效；构建产物入库无意义）。
+  2. `git rm --cached -r Win32`（`Win32/Release/vbdmcp.dll` 目前仍被跟踪，`Win32/` 已写入 ignore 但对已跟踪文件无效；构建产物入库无意义）。
   3. `tools/` 下的 28 个 `.tlog/.obj/.pdb` 等中间产物保留在磁盘但不入库。
 - **工作量**：S（约 20 分钟）。
 
@@ -102,7 +102,7 @@
 
 #### P1-5 设置窗体「可拖拽缩放」实际失效（rc 丢失 `WS_THICKFRAME`）
 
-- **证据**：`res/vbmcp.rc:25` 模板 2000 的 STYLE 为 `DS_SETFONT | DS_MODALFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_POPUP | WS_CAPTION | WS_SYSMENU`——**没有 `WS_THICKFRAME`**，窗口边框不可拖动缩放。而 `docs/DEVELOPMENT.md`（168-171 行、147-155 行）与 `REFACTOR_PROGRESS.md`（阶段 K/L）均宣称「加 WS_THICKFRAME 可拖拽缩放」「template 已带 WS_THICKFRAME」，`layout_dialog()`/`WM_GETMINMAXINFO` 也都是按可缩放写的。
+- **证据**：`res/vbdmcp.rc:25` 模板 2000 的 STYLE 为 `DS_SETFONT | DS_MODALFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_POPUP | WS_CAPTION | WS_SYSMENU`——**没有 `WS_THICKFRAME`**，窗口边框不可拖动缩放。而 `docs/DEVELOPMENT.md`（168-171 行、147-155 行）与 `REFACTOR_PROGRESS.md`（阶段 K/L）均宣称「加 WS_THICKFRAME 可拖拽缩放」「template 已带 WS_THICKFRAME」，`layout_dialog()`/`WM_GETMINMAXINFO` 也都是按可缩放写的。
 - **风险背景**：`.rc` 归 VS 资源编辑器管，保存时会把未勾选 "Resizing" 的样式重写掉——这正是文档里反复记录过的坑。
 - **建议（推荐 a）**：
   - a. 在 `dlg_proc` 的 `WM_INITDIALOG` 运行期 `SetWindowLongPtr(GWL_STYLE, style | WS_THICKFRAME)` + `SetWindowPos(..., SWP_FRAMECHANGED)`；对资源编辑器免疫，无需重新踩坑；
@@ -112,7 +112,7 @@
 #### P1-6 设置窗体交互两处不一致
 
 - **证据 1（Esc 无效）**：`src/options_dialog.cpp:1093-1201` 的 `WM_COMMAND` 对未匹配 id 一律 `return TRUE`，`IDCANCEL`（Esc 键，id=2）被吞掉，按 Esc 无法关闭窗体（点 X 正常）。
-- **证据 2（恢复默认立即生效）**：`src/options_dialog.cpp:1150-1168` 的「恢复默认设置」直接 `vbmcp_server_stop()` + 写注册表 + 重置全局变量，点「取消」无法撤销；与同窗体「确定/取消」语义冲突。
+- **证据 2（恢复默认立即生效）**：`src/options_dialog.cpp:1150-1168` 的「恢复默认设置」直接 `vbdmcp_server_stop()` + 写注册表 + 重置全局变量，点「取消」无法撤销；与同窗体「确定/取消」语义冲突。
 - **建议**：① `if (id == IDCANCEL) { EndDialog(IDCANCEL); return TRUE; }`；② 「恢复默认设置」只重置控件状态（不落盘、不停服务），统一由「确定」生效；如需保留立即生效语义，则弹确认框并在文档中写明。
 - **工作量**：S。
 
@@ -120,44 +120,44 @@
 
 #### P2-1 SSE 发送缓冲无上限，慢客户端可撑爆内存
 
-- **证据**：`src/mcp_http.cpp:343-351` `sse_push_json()` 直接 `send_buf += ...`，心跳（`: ping`）与 `tools/list_changed` 广播同样追加；`vbmcp_flush()` 只在可写时消化。若客户端不读（连接僵死），缓冲无界增长。
-- **建议**：为 `Connection::send_buf` 设上限（例如 4MB），超限记录日志并断开该连接（与 `VBMCP_MAX_CONNECTIONS` 同层防御）。
+- **证据**：`src/mcp_http.cpp:343-351` `sse_push_json()` 直接 `send_buf += ...`，心跳（`: ping`）与 `tools/list_changed` 广播同样追加；`vbdmcp_flush()` 只在可写时消化。若客户端不读（连接僵死），缓冲无界增长。
+- **建议**：为 `Connection::send_buf` 设上限（例如 4MB），超限记录日志并断开该连接（与 `VBDMCP_MAX_CONNECTIONS` 同层防御）。
 - **工作量**：S。
 
 #### P2-2 HTTP 头部长度限制未真正生效
 
-- **证据**：`src/mcp_http.cpp:421-427` 只在**未找到** `\r\n\r\n` 时检查 `buf.size() > VBMCP_MAX_HEADER_SIZE`；一旦分隔符出现，`headers_len` 不再受 16KB 限制（`connection_on_readable` 只按 `VBMCP_MAX_BODY_SIZE + VBMCP_MAX_HEADER_SIZE` 兜底，即单连接可缓存 64MB+16KB；64 个连接理论峰值 4GB）。
-- **建议**：`parse_request` 中在定位 `hdr_end` 后校验 `headers_len <= VBMCP_MAX_HEADER_SIZE`，否则返回 -1；`recv_buf` 超限时先校验能否组成完整请求再拒绝。
+- **证据**：`src/mcp_http.cpp:421-427` 只在**未找到** `\r\n\r\n` 时检查 `buf.size() > VBDMCP_MAX_HEADER_SIZE`；一旦分隔符出现，`headers_len` 不再受 16KB 限制（`connection_on_readable` 只按 `VBDMCP_MAX_BODY_SIZE + VBDMCP_MAX_HEADER_SIZE` 兜底，即单连接可缓存 64MB+16KB；64 个连接理论峰值 4GB）。
+- **建议**：`parse_request` 中在定位 `hdr_end` 后校验 `headers_len <= VBDMCP_MAX_HEADER_SIZE`，否则返回 -1；`recv_buf` 超限时先校验能否组成完整请求再拒绝。
 - **工作量**：S。
 
 #### P2-3 `initialize` 靠 body 字符串搜索识别
 
-- **证据**：`src/mcp_http.cpp:671` `req.body.find("\"initialize\"") != npos`。任何 arguments/文本里含 `"initialize"` 字样的请求（例如 `vb_write_function` 写入含该词的代码）都会被分配 `Mcp-Session-Id`。
+- **证据**：`src/mcp_http.cpp:671` `req.body.find("\"initialize\"") != npos`。任何 arguments/文本里含 `"initialize"` 字样的请求（例如 `vbd_write_function` 写入含该词的代码）都会被分配 `Mcp-Session-Id`。
 - **建议**：让 UI 线程在任务完成时把「该请求是 initialize」写回 `UiTask`（加一个 `bool is_initialize`），网络线程据此分配会话 id 并回带响应头——零解析假设。次选：网络线程按 `"method"`+空白+`"initialize"` 模式做有界扫描（前 512 字节）。
 - **工作量**：M（推荐方案）。
 
 #### P2-4 服务未运行时广播标记会残留到下次启动
 
-- **证据**：`src/mcp_http.cpp:1143-1151` `vbmcp_notify_tools_list_changed()` 只置位 `g_list_changed_pending`；若此时服务器未运行（设置窗体在服务关闭状态下改权限），标志会留到下一次启动，首个 SSE 连接收到一次无意义的 `list_changed`。
-- **建议**：加 `if (!vbmcp_server_is_running()) return;`；或启动时清空标志。
+- **证据**：`src/mcp_http.cpp:1143-1151` `vbdmcp_notify_tools_list_changed()` 只置位 `g_list_changed_pending`；若此时服务器未运行（设置窗体在服务关闭状态下改权限），标志会留到下一次启动，首个 SSE 连接收到一次无意义的 `list_changed`。
+- **建议**：加 `if (!vbdmcp_server_is_running()) return;`；或启动时清空标志。
 - **工作量**：S。
 
 #### P2-5 CORS 白名单每次请求读注册表
 
-- **证据**：`src/mcp_http.cpp:141-161` `origin_is_trusted()` 每个 POST/OPTIONS 都 `vbmcp_config_get_cors_origins()`（RegOpenKey + 读 1KB）。默认配置下等于每请求一次无谓注册表访问。
-- **建议**：改为进程级缓存 + 设置窗体保存时刷新（或在 `vbmcp_config_save` 后失效）。
+- **证据**：`src/mcp_http.cpp:141-161` `origin_is_trusted()` 每个 POST/OPTIONS 都 `vbdmcp_config_get_cors_origins()`（RegOpenKey + 读 1KB）。默认配置下等于每请求一次无谓注册表访问。
+- **建议**：改为进程级缓存 + 设置窗体保存时刷新（或在 `vbdmcp_config_save` 后失效）。
 - **工作量**：S。
 
 #### P2-6 模块列表每次全量探测，无缓存
 
-- **证据**：`src/mcp_tools.cpp:263-298` `vb_read_list_modules` 每次调用都从 0 开始逐个调 `VB_GetModuleName`（每个索引一次引擎调用 + WideCharToMultiByte 分配），上限 10000 次。大项目下每次 list 都是 O(N) 引擎调用。`vb_read_list_forms` 用 `VB_GetVBFormCount` 无此问题。
-- **建议**：加短生命周期缓存（如项目文本哈希/`VB_GetFileName` + 写入操作失效），或首次探测后缓存「模块数」；同时在文档写明 SDK 的 `VB_GetModuleCount` 语义冲突背景。
+- **证据**：`src/mcp_tools.cpp:263-298` `vbd_read_list_modules` 每次调用都从 0 开始逐个调 `VBD_GetModuleName`（每个索引一次引擎调用 + WideCharToMultiByte 分配），上限 10000 次。大项目下每次 list 都是 O(N) 引擎调用。`vbd_read_list_forms` 用 `VBD_GetVBFormCount` 无此问题。
+- **建议**：加短生命周期缓存（如项目文本哈希/`VBD_GetFileName` + 写入操作失效），或首次探测后缓存「模块数」；同时在文档写明 SDK 的 `VBD_GetModuleCount` 语义冲突背景。
 - **工作量**：M。
 
 #### P2-7 日志实现重复且无上限
 
-- **证据**：`src/util.cpp:81-153` `vbmcp_logf` 与 `vbmcp_log` 是两份几乎相同的实现（仅阈值/标签差异）；日志文件 `%TEMP%\vbmcp.log` 只追加，无大小/日期轮转。
-- **建议**：`vbmcp_log` 改为转调 `vbmcp_logf(VBMCP_LOG_INFO, ...)`；首次写入时按大小（如 10MB）截断或轮转。
+- **证据**：`src/util.cpp:81-153` `vbdmcp_logf` 与 `vbdmcp_log` 是两份几乎相同的实现（仅阈值/标签差异）；日志文件 `%TEMP%\vbdmcp.log` 只追加，无大小/日期轮转。
+- **建议**：`vbdmcp_log` 改为转调 `vbdmcp_logf(VBDMCP_LOG_INFO, ...)`；首次写入时按大小（如 10MB）截断或轮转。
 - **工作量**：S。
 
 #### P2-8 `/health` 在开放局域网时暴露宿主绝对路径
@@ -172,8 +172,8 @@
 
 - **证据链**：
   - 读：`src/vbdec_sdk.cpp:53-80` 把引擎返回的 UTF-16 转成 **ANSI（GBK）**；工具层 `src/mcp_tools.cpp` 直接 `yyjson_mut_obj_add_strcpy` 写进 JSON，序列化用 `YYJSON_WRITE_ALLOW_INVALID_UNICODE`（`doc_to_string`）。即**工具结果里含 GBK 原始字节，不是合法 UTF-8 的 JSON**。
-  - 写：客户端按 JSON 规范发送 **UTF-8**；`arg_str()` 直取字节后 `vb_set_value()` 原样透传给按 ANSI 解析的引擎（`engine_set_from_ansi`），中文写入会乱码。
-  - 对照组：UI 路径已有正确做法（`vbmcp_str_to_gbk`，`src/util.cpp:165`），但只被 `options_dialog.cpp:632` 使用；工具层没有任何转换。
+  - 写：客户端按 JSON 规范发送 **UTF-8**；`arg_str()` 直取字节后 `vbd_set_value()` 原样透传给按 ANSI 解析的引擎（`engine_set_from_ansi`），中文写入会乱码。
+  - 对照组：UI 路径已有正确做法（`vbdmcp_str_to_gbk`，`src/util.cpp:165`），但只被 `options_dialog.cpp:632` 使用；工具层没有任何转换。
 - **影响**：AI 客户端读取含中文的反编译代码/字符串时可能显示乱码；AI 写入含中文的代码时工程数据被写坏。**这是需要实测确认影响面的最高价值改进**（若你的项目主要是英文标识符，影响面小；但字符串字面量/注释中文很常见）。
 - **方案选项**：
   - A. **维持现状**，在 README/SECURITY 明确「工具数据为 ANSI/GBK 字节」，由用户自行处理；
@@ -205,16 +205,16 @@
 | # | 位置 | 现状 | 应更新为 |
 |---|---|---|---|
 | 1 | `README.md` 文件结构、`README_EN.md`、`docs/DEVELOPMENT.md:59` | 描述 `src/strbuf.h` / `strbuf.cpp` 模块 | 该模块已删除（git 显示 `RD src/strbuf.*`），条目移除 |
-| 2 | `docs/DEVELOPMENT.md:270,273` 新增工具示例 | 使用已删除的 `vbmcp_t_utf8(T_ERR_*)` API | 改为 `_()` / `_F()` 示例 |
+| 2 | `docs/DEVELOPMENT.md:270,273` 新增工具示例 | 使用已删除的 `vbdmcp_t_utf8(T_ERR_*)` API | 改为 `_()` / `_F()` 示例 |
 | 3 | `docs/DEVELOPMENT.md:125,351`、`REFACTOR_PROGRESS.md:175` | 引用 `tools/i18n_selftest`（20 项断言） | 该目录不存在；要么恢复该测试工程（见 P4-3），要么改为说明「自测已移除」 |
 | 4 | `docs/DEVELOPMENT.md`（i18n 章节）/`REFACTOR_PROGRESS.md:144,176` | 「104 条词条」 | 实测 98 条（zh 已译 95 / 待译 3） |
 | 5 | `REFACTOR_PROGRESS.md` 阶段 K/L、`DEVELOPMENT.md:168-171` | 「rc 带 WS_THICKFRAME，窗体可拖拽缩放」 | 实际 rc 无 WS_THICKFRAME（见 P1-5），修复后再恢复表述 |
 | 6 | `README.md:244-276` 文件结构 | 未列 `docs/OPTIMIZATION_PLAN.md`、`lang_res/` 新文件 | 随 P0-2 提交时顺带更新 |
 | 7 | `src/config.cpp:20` | 注释指向已删除的 `lang.cpp` | 改为 `i18n.cpp` |
-| 8 | `src/vbmcp_mem.hpp:56-58` | 注释描述 `ScopeGuard`（未实现） | 实现或删除注释 |
+| 8 | `src/vbdmcp_mem.hpp:56-58` | 注释描述 `ScopeGuard`（未实现） | 实现或删除注释 |
 | 9 | `src/mcp_tools.h:30`、`src/mcp_tools.cpp:1029` | `mcp_build_tools_schema()` 无调用点（死代码） | 删除，或接入 `/health`/调试端点 |
-| 10 | `src/vbmcp.h:178`、`util.cpp:121` | `vbmcp_log` 标注「兼容旧调用点」 | 合并到 `vbmcp_logf`（见 P2-7） |
-| 11 | `res/vbmcp.rc:114` | 版本信息 `Translation 0x409, 1200`（英文）但资源语言是中文 | 改 `0x804, 1200` 或保持（无功能影响，最低优先级） |
+| 10 | `src/vbdmcp.h:178`、`util.cpp:121` | `vbdmcp_log` 标注「兼容旧调用点」 | 合并到 `vbdmcp_logf`（见 P2-7） |
+| 11 | `res/vbdmcp.rc:114` | 版本信息 `Translation 0x409, 1200`（英文）但资源语言是中文 | 改 `0x804, 1200` 或保持（无功能影响，最低优先级） |
 | 12 | `zh.json` 3 条待译 | `mcp_http.cpp` 网络线程的 3 条 `_F()` 消息未翻译 | 补中文 |
 
 - **工作量**：M（2–3 小时）。
@@ -233,9 +233,9 @@
 | # | 项 | 说明 |
 |---|---|---|
 | 1 | `build.bat` 硬编码宿主路径 `E:\Ollydbg\VB Decompiler Pro v11.5` | 改为 `if defined VBDEC_DIR (...)` 可用环境变量覆盖 |
-| 2 | `vbmcp_server_start()` 用 `Sleep(10)×300` 忙等 bind 完成（`mcp_http.cpp:1069`） | 理论上 UI 线程最长阻塞 3 秒；可改为事件/条件变量等待，通常 <10ms 无感 |
+| 2 | `vbdmcp_server_start()` 用 `Sleep(10)×300` 忙等 bind 完成（`mcp_http.cpp:1069`） | 理论上 UI 线程最长阻塞 3 秒；可改为事件/条件变量等待，通常 <10ms 无感 |
 | 3 | `tools/list` 工具描述超长（最长约 260 字符） | 影响 AI 上下文占用；可选精简，或按需拆「详细描述」到 `instructions` |
-| 4 | 结果字段类型 | `vb_read_project_info` 的 `is_native`/`is_packed` 返回 `"1"/"0"` 字符串，可加布尔字段（保留旧字段兼容） |
+| 4 | 结果字段类型 | `vbd_read_project_info` 的 `is_native`/`is_packed` 返回 `"1"/"0"` 字符串，可加布尔字段（保留旧字段兼容） |
 | 5 | 协议版本 | ~~后续评估向 2025-06-18 演进~~ → 已实施（阶段 M 8.5）：支持集合 {2025-06-18, 2025-03-26, 2024-11-05}，`initialize` 按客户端请求协商 |
 | 6 | 提交前检查 | 可在 `tools/check_all.bat` 之外补 CI（GitHub Actions 或本地 pre-commit），至少跑两个 `--check` |
 
@@ -247,7 +247,7 @@
 
 | 批次 | 内容 | 预计工作量 | 验收标准 |
 |---|---|---|---|
-| **批次 1（建议立即）** | P0-1、P0-2（gitignore + 分批提交） | 1 小时 | `git status` 干净；重新检出后 `tools/` 脚本存在；`vbmcp.dll` 不再被跟踪 |
+| **批次 1（建议立即）** | P0-1、P0-2（gitignore + 分批提交） | 1 小时 | `git status` 干净；重新检出后 `tools/` 脚本存在；`vbdmcp.dll` 不再被跟踪 |
 | **批次 2（低成本修复）** | P1-1 ~ P1-6、P2-4、P2-7、P4-1 文档批量同步、`zh.json` 3 条补译 | 半天 | Release 0 error/0 warning；`extract_i18n --check` 与 `gen_ids_header --check` 通过；`tools/list` 描述无 `\"`；Esc 可关窗；窗体可拖拽缩放 |
 | **批次 3（健壮性）** | P2-1、P2-2、P2-3、P2-5、P2-6、D-4、P2-8 | 1 天 | 新增针对 `parse_request`/SSE 上限的 selftest 用例；大项目下列表工具耗时下降（可日志计时对比） |
 | **批次 4（决策后执行）** | D-1（按你选的方案）+ D-3 合并重构 + 实测 | 1–2 天 | 中文项目「读 → AI 修改 → 写 → 回读」全链路一致；旧行为可通过参数/开关回退 |
@@ -257,9 +257,9 @@
 
 ## 4. 每批次的统一验证方式
 
-1. `msbuild vbmcp.sln /p:Configuration=Release /p:Platform=Win32` → 0 error / 0 warning；
+1. `msbuild vbdmcp.sln /p:Configuration=Release /p:Platform=Win32` → 0 error / 0 warning；
 2. `python tools/extract_i18n.py --check`、`python tools/gen_ids_header.py --check` 通过；
-3. UI 相关改动：`ui_preview` 截图（中/英 × 默认/放大）人工比对 + `%TEMP%\vbmcp_ui_probe.txt` 坐标抽查；
+3. UI 相关改动：`ui_preview` 截图（中/英 × 默认/放大）人工比对 + `%TEMP%\vbdmcp_ui_probe.txt` 坐标抽查；
 4. 协议相关改动：`curl` 验证 `/health`、`tools/list` 数量、`initialize` 能力字段、`notifications/*` 返回 202、Esc/缩放行为；
 5. 涉及宿主的改动（D-1 等）：在装有 VB Decompiler 的机器上按 `REFACTOR_PROGRESS.md` 第七节手工回归清单执行，并补充「中文项目读写一致性」用例。
 

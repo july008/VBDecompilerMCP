@@ -22,19 +22,19 @@
 * 设计原则：
 *   - 不存在 / 字段缺失时返回默认值，不抛错。
 *   - RegOpenKey 在缺失子键时 CreateKey 自动建立，简化 "首次保存" 流程。
-*   - vbmcp_config_load / save 在 DLL 主线程中调用，无须并发保护。
+*   - vbdmcp_config_load / save 在 DLL 主线程中调用，无须并发保护。
 */
-#include "vbmcp.h"
+#include "vbdmcp.h"
 #include <stdio.h>
 
 /* 主键：与 VB Decompiler 自身的 Options 项同级，作为 MCP 子键 */
-#define VBMCP_REG_ROOT  HKEY_CURRENT_USER
-#define VBMCP_REG_KEY   "SOFTWARE\\VB and VBA Program Settings\\VB Decompiler\\MCP"
-#define VBMCP_VAL_ENABLE  "EnableMcp"
-#define VBMCP_VAL_PORT    "Port"
-#define VBMCP_VAL_BIND    "BindAddress"
-#define VBMCP_VAL_ALLOW_WRITE "AllowWrite"
-#define VBMCP_VAL_CORS    "CorsOrigins"
+#define VBDMCP_REG_ROOT  HKEY_CURRENT_USER
+#define VBDMCP_REG_KEY   "SOFTWARE\\VB and VBA Program Settings\\VB Decompiler\\MCP"
+#define VBDMCP_VAL_ENABLE  "EnableMcp"
+#define VBDMCP_VAL_PORT    "Port"
+#define VBDMCP_VAL_BIND    "BindAddress"
+#define VBDMCP_VAL_ALLOW_WRITE "AllowWrite"
+#define VBDMCP_VAL_CORS    "CorsOrigins"
 
 /* 读 REG_SZ 到用户缓冲（不写默认值；仅在类型不符或失败时清空）。 */
 static int reg_read_sz(HKEY hKey, const char *value, char *out, size_t cap)
@@ -81,13 +81,13 @@ static HKEY open_key(BOOL create)
     HKEY hKey = NULL;
     if (create) {
         DWORD disp = 0;
-        if (RegCreateKeyExA(VBMCP_REG_ROOT, VBMCP_REG_KEY,
+        if (RegCreateKeyExA(VBDMCP_REG_ROOT, VBDMCP_REG_KEY,
                             0, NULL, REG_OPTION_NON_VOLATILE,
                             KEY_READ | KEY_WRITE, NULL, &hKey, &disp) != ERROR_SUCCESS) {
             return NULL;
         }
     } else {
-        if (RegOpenKeyExA(VBMCP_REG_ROOT, VBMCP_REG_KEY, 0,
+        if (RegOpenKeyExA(VBDMCP_REG_ROOT, VBDMCP_REG_KEY, 0,
                           KEY_READ, &hKey) != ERROR_SUCCESS) {
             return NULL;
         }
@@ -95,19 +95,19 @@ static HKEY open_key(BOOL create)
     return hKey;
 }
 
-void vbmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_write)
+void vbdmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_write)
 {
-    if (port)   *port   = VBMCP_DEFAULT_PORT;
-    if (allow_write) *allow_write = VBMCP_DEFAULT_ALLOW_WRITE;
+    if (port)   *port   = VBDMCP_DEFAULT_PORT;
+    if (allow_write) *allow_write = VBDMCP_DEFAULT_ALLOW_WRITE;
     if (bind_out && bind_cap) {
-        _snprintf_s(bind_out, bind_cap, _TRUNCATE, "%s", VBMCP_DEFAULT_BIND);
+        _snprintf_s(bind_out, bind_cap, _TRUNCATE, "%s", VBDMCP_DEFAULT_BIND);
     }
 
     HKEY hKey = open_key(FALSE);
     if (!hKey) {
-        vbmcp_config_save(port   ? *port   : VBMCP_DEFAULT_PORT,
-                          (bind_out && bind_out[0]) ? bind_out : VBMCP_DEFAULT_BIND,
-                          allow_write ? *allow_write : VBMCP_DEFAULT_ALLOW_WRITE);
+        vbdmcp_config_save(port   ? *port   : VBDMCP_DEFAULT_PORT,
+                          (bind_out && bind_out[0]) ? bind_out : VBDMCP_DEFAULT_BIND,
+                          allow_write ? *allow_write : VBDMCP_DEFAULT_ALLOW_WRITE);
         return;
     }
 
@@ -115,21 +115,21 @@ void vbmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_wr
     BOOL need_rewrite = FALSE;
 
     DWORD dw = 0;
-    if (reg_read_dw(hKey, VBMCP_VAL_PORT, &dw) && port) {
+    if (reg_read_dw(hKey, VBDMCP_VAL_PORT, &dw) && port) {
         if (dw > 0 && dw < 65536) *port = (int)dw;
         else need_rewrite = TRUE;  /* 越界值 → 写回 */
     } else {
         need_rewrite = TRUE;
     }
 
-    if (reg_read_sz(hKey, VBMCP_VAL_BIND, val, sizeof(val)) && bind_out && bind_cap) {
+    if (reg_read_sz(hKey, VBDMCP_VAL_BIND, val, sizeof(val)) && bind_out && bind_cap) {
         _snprintf_s(bind_out, bind_cap, _TRUNCATE, "%s", val);
     } else {
         need_rewrite = TRUE;
     }
 
     /* AllowWrite：缺失时用默认（只读）；不触发 rewrite，避免老用户被强制写入新键 */
-    if (reg_read_dw(hKey, VBMCP_VAL_ALLOW_WRITE, &dw) && allow_write) {
+    if (reg_read_dw(hKey, VBDMCP_VAL_ALLOW_WRITE, &dw) && allow_write) {
         *allow_write = (dw != 0) ? 1 : 0;
     }
 
@@ -137,40 +137,40 @@ void vbmcp_config_load(int *port, char *bind_out, size_t bind_cap, int *allow_wr
 
     /* 有任何缺失 / 越界 / 不可识别值 → 把当前（已用默认值填补的）结果写回注册表 */
     if (need_rewrite) {
-        vbmcp_config_save(port   ? *port   : VBMCP_DEFAULT_PORT,
-                          (bind_out && bind_out[0]) ? bind_out : VBMCP_DEFAULT_BIND,
-                          allow_write ? *allow_write : VBMCP_DEFAULT_ALLOW_WRITE);
+        vbdmcp_config_save(port   ? *port   : VBDMCP_DEFAULT_PORT,
+                          (bind_out && bind_out[0]) ? bind_out : VBDMCP_DEFAULT_BIND,
+                          allow_write ? *allow_write : VBDMCP_DEFAULT_ALLOW_WRITE);
     }
 
 }
 
-void vbmcp_config_save(int port, const char *bind, int allow_write)
+void vbdmcp_config_save(int port, const char *bind, int allow_write)
 {
    
     HKEY hKey = open_key(TRUE);
     if (!hKey) {
-        vbmcp_log("config save: create/open key failed");
+        vbdmcp_log("config save: create/open key failed");
         return;
     }
 
     /* 不写 EnableMcp 字段 —— 见上方说明 */
-    reg_write_dw(hKey, VBMCP_VAL_PORT, (DWORD)(port > 0 ? port : VBMCP_DEFAULT_PORT));
-    reg_write_sz(hKey, VBMCP_VAL_BIND, (bind && *bind) ? bind : VBMCP_DEFAULT_BIND);
-    reg_write_dw(hKey, VBMCP_VAL_ALLOW_WRITE, allow_write ? 1u : 0u);
+    reg_write_dw(hKey, VBDMCP_VAL_PORT, (DWORD)(port > 0 ? port : VBDMCP_DEFAULT_PORT));
+    reg_write_sz(hKey, VBDMCP_VAL_BIND, (bind && *bind) ? bind : VBDMCP_DEFAULT_BIND);
+    reg_write_dw(hKey, VBDMCP_VAL_ALLOW_WRITE, allow_write ? 1u : 0u);
 
     RegCloseKey(hKey);
-    vbmcp_log("config saved: port=%d, bind=%s, allow_write=%d",
-              port, bind ? bind : VBMCP_DEFAULT_BIND, allow_write ? 1 : 0);
+    vbdmcp_log("config saved: port=%d, bind=%s, allow_write=%d",
+              port, bind ? bind : VBDMCP_DEFAULT_BIND, allow_write ? 1 : 0);
 }
 
 /* 可信 CORS origin 列表（逗号分隔）。空串 = 未配置。允许 "*" 会被忽略。 */
-void vbmcp_config_get_cors_origins(char *out, size_t cap)
+void vbdmcp_config_get_cors_origins(char *out, size_t cap)
 {
     if (!out || cap == 0) return;
     out[0] = '\0';
 
     HKEY hKey = open_key(FALSE);
     if (!hKey) return;
-    reg_read_sz(hKey, VBMCP_VAL_CORS, out, cap);
+    reg_read_sz(hKey, VBDMCP_VAL_CORS, out, cap);
     RegCloseKey(hKey);
 }

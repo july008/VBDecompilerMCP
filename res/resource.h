@@ -1,6 +1,6 @@
 //{{NO_DEPENDENCIES}}
 // Microsoft Visual C++ 生成的包含文件。
-// 供 vbmcp.rc 使用
+// 供 vbdmcp.rc 使用
 //
 #define SW_HIDE                         0
 #define HIDE_WINDOW                     0
@@ -1492,7 +1492,7 @@
 #define NEWFORMATDLGWITHLINK            1591
 #define IDC_MANAGE_LINK                 1592
 #define _WIN32_IE_IE70                  0x0700
-#define IDD_VBMCP_OPTIONS               2000
+#define IDD_VBDMCP_OPTIONS               2000
 #define IDD_PAGE_SERVER                 2001
 #define IDD_PAGE_ACCESS                 2002
 #define _WIN32_IE_IE80                  0x0800

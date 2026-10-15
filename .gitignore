@@ -8,7 +8,7 @@ Win32/
 *.ilk
 *.idb
 
-# VS 本地状态与资源编辑器缓存（res/vbmcp.rc 的图形编辑状态，会随时重建）
+# VS 本地状态与资源编辑器缓存（res/vbdmcp.rc 的图形编辑状态，会随时重建）
 .vs/
 *.aps
 

@@ -13,7 +13,7 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>vbmcp</RootNamespace>
+    <RootNamespace>vbdmcp</RootNamespace>
     <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
@@ -46,13 +46,13 @@
     <IntDir>$(Platform)\$(Configuration)\obj\</IntDir>
     <LinkIncremental Condition="'$(Configuration)'=='Debug'">true</LinkIncremental>
     <LinkIncremental Condition="'$(Configuration)'=='Release'">false</LinkIncremental>
-    <TargetName>vbmcp</TargetName>
+    <TargetName>vbdmcp</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;VBMCP_EXPORTS;_CRT_SECURE_NO_WARNINGS;NOMINMAX;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;VBDMCP_EXPORTS;_CRT_SECURE_NO_WARNINGS;NOMINMAX;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
@@ -67,7 +67,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <ModuleDefinitionFile>src\vbmcp.def</ModuleDefinitionFile>
+      <ModuleDefinitionFile>src\vbdmcp.def</ModuleDefinitionFile>
       <AdditionalDependencies>ws2_32.lib;user32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -77,7 +77,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;VBMCP_EXPORTS;_CRT_SECURE_NO_WARNINGS;NOMINMAX;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;VBDMCP_EXPORTS;_CRT_SECURE_NO_WARNINGS;NOMINMAX;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -91,7 +91,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <ModuleDefinitionFile>src\vbmcp.def</ModuleDefinitionFile>
+      <ModuleDefinitionFile>src\vbdmcp.def</ModuleDefinitionFile>
       <AdditionalDependencies>ws2_32.lib;user32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -100,9 +100,9 @@
     <ClInclude Include="src\i18n.h" />
     <ClInclude Include="src\khash.h" />
     <ClInclude Include="src\mcp_tools.h" />
-    <ClInclude Include="src\vbmcp.h" />
-    <ClInclude Include="src\vbmcp_ids.h" />
-    <ClInclude Include="src\vbmcp_mem.hpp" />
+    <ClInclude Include="src\vbdmcp.h" />
+    <ClInclude Include="src\vbdmcp_ids.h" />
+    <ClInclude Include="src\vbdmcp_mem.hpp" />
     <ClInclude Include="third_party\yyjson\src\yyjson.h" />
   </ItemGroup>
   <ItemGroup>
@@ -121,18 +121,18 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="src\vbmcp.def" />
+    <None Include="src\vbdmcp.def" />
     <None Include="lang_res\zh.json" />
   </ItemGroup>
   <ItemGroup>
-    <!-- res/vbmcp.rc is owned by the Visual Studio resource editor: every save
+    <!-- res/vbdmcp.rc is owned by the Visual Studio resource editor: every save
          rewrites the whole file and drops "#include <windows.h>", which rc.exe
          needs for the DIALOGEX keywords (DS_SETFONT / WS_* / ES_* / BS_* ...).
          So it is NOT compiled directly: the VbmcpPrepRc target below builds a
          wrapper that pulls windows.h in first and then includes it verbatim,
          which lets the UI be edited in the resource editor without breaking
          the build. -->
-    <ResourceCompile Include="res\vbmcp.rc" />
+    <ResourceCompile Include="res\vbdmcp.rc" />
   </ItemGroup>
   <PropertyGroup>
     <BeforeResourceCompileTargets>$(BeforeResourceCompileTargets);VbmcpPrepRc</BeforeResourceCompileTargets>
@@ -140,9 +140,9 @@
   <Target Name="VbmcpPrepRc">
     <MakeDir Directories="$(IntDir)rc" />
     <!-- rc.exe resolves a RCDATA file name relative to the file being compiled,
-         which here is $(IntDir)rc\vbmcp_build.rc. The language pack therefore
+         which here is $(IntDir)rc\vbdmcp_build.rc. The language pack therefore
          has to sit one level above it for the "..\lang_res\zh.json" path that
-         vbmcp.rc uses to keep resolving. -->
+         vbdmcp.rc uses to keep resolving. -->
     <Copy SourceFiles="$(ProjectDir)lang_res\zh.json"
           DestinationFolder="$(IntDir)lang_res"
           SkipUnchangedFiles="true" />
@@ -158,17 +158,17 @@
 #undef HTERROR
 #undef PWR_FAIL
 #undef HTTRANSPARENT
-#include &quot;$(ProjectDir)res\vbmcp.rc&quot;</VbmcpRcWrapper>
+#include &quot;$(ProjectDir)res\vbdmcp.rc&quot;</VbmcpRcWrapper>
     </PropertyGroup>
-    <WriteLinesToFile File="$(IntDir)rc\vbmcp_build.rc"
+    <WriteLinesToFile File="$(IntDir)rc\vbdmcp_build.rc"
                       Lines="$(VbmcpRcWrapper)"
                       Overwrite="true"
                       WriteOnlyWhenDifferent="true" />
     <ItemGroup>
       <!-- Swap the editor-owned script for the wrapper. ResourceCompile has no
            ExcludedFromBuild support, so the item list is edited here instead. -->
-      <ResourceCompile Remove="res\vbmcp.rc" />
-      <ResourceCompile Include="$(IntDir)rc\vbmcp_build.rc" />
+      <ResourceCompile Remove="res\vbdmcp.rc" />
+      <ResourceCompile Include="$(IntDir)rc\vbdmcp_build.rc" />
     </ItemGroup>
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

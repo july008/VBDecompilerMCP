@@ -1,6 +1,6 @@
 # Security Policy / 安全模型
 
-本文说明 vbmcp（VB Decompiler MCP Server 插件）的安全边界、默认行为与已知风险。
+本文说明 vbdmcp（VB Decompiler MCP Server 插件）的安全边界、默认行为与已知风险。
 **在把本服务开放给 AI 代理之前，请完整阅读本文。**
 
 ---
@@ -23,13 +23,13 @@ VB Decompiler 反编译出来的项目（源码、窗体、字符串、密钥痕
 | 监听地址 | `127.0.0.1` | 仅本机可访问。**代码中不存在默认 `0.0.0.0` 路径** |
 | 监听端口 | `3023` | 可在设置窗体/注册表修改 |
 | 服务启用 | 关闭 | 每次 VB Decompiler 启动后需手动勾选启用 |
-| 写入权限 | 关闭（只读） | `vb_write_*` 不出现在 `listTools`，也无法被调用 |
+| 写入权限 | 关闭（只读） | `vbd_write_*` 不出现在 `listTools`，也无法被调用 |
 | CORS | 不返回任何 CORS 头 | 禁止 `Access-Control-Allow-Origin: *` |
 | 会话准入 | 首次 `tools/call` 弹窗确认 | `listTools` / `initialize` / `ping` 等预检不弹窗 |
 | 请求体上限 | 64MB（头部 16KB） | 超限返回 `413` |
 | 请求频率 | 200 req/s（全局） | 超限返回 `429` |
 | 并发任务 | 8（UI 任务队列） | 队列满返回 `429` + `-32003` |
-| 单任务超时 | 30s | 超时返回 `-32002`；可用 `VBMCP_TASK_TIMEOUT_MS` 调整 |
+| 单任务超时 | 30s | 超时返回 `-32002`；可用 `VBDMCP_TASK_TIMEOUT_MS` 调整 |
 | SSE 待发缓冲 | 4MB/连接 | 慢客户端导致缓冲超限时直接断开该连接（防僵死连接吃光内存） |
 
 ---
@@ -38,19 +38,19 @@ VB Decompiler 反编译出来的项目（源码、窗体、字符串、密钥痕
 
 ### 3.1 AI 代理会自主调用 `write_*` 工具（真实风险）
 
-`vb_write_*` 会**直接改写 VB Decompiler 内存中的工程数据**，例如：
+`vbd_write_*` 会**直接改写 VB Decompiler 内存中的工程数据**，例如：
 
-- `vb_write_project_text`：整体覆盖项目文本；
-- `vb_write_clear_buffers`：清空内部缓冲；
-- `vb_write_rename_form` / `vb_write_rename_function`：重命名成员；
-- `vb_write_active_text`：改写你当前正在编辑的窗口内容。
+- `vbd_write_project_text`：整体覆盖项目文本；
+- `vbd_write_clear_buffers`：清空内部缓冲；
+- `vbd_write_rename_form` / `vbd_write_rename_function`：重命名成员；
+- `vbd_write_active_text`：改写你当前正在编辑的窗口内容。
 
 一旦开启写入权限，**AI 代理的一次误判就会破坏工程内容**（尤其是整体覆盖类工具）。
 VB Decompiler 未提供项目级撤销/回滚 API，**请务必先备份原始 exe/工程**。
 
 缓解措施：
 1. 只在需要时临时开启写入权限，用完立即关闭；
-2. 优先使用细粒度工具（`vb_write_form` / `vb_write_function`），慎用整体覆盖类工具；
+2. 优先使用细粒度工具（`vbd_write_form` / `vbd_write_function`），慎用整体覆盖类工具；
 3. 在设置窗体状态栏确认当前是「只读模式」还是「读写模式」。
 
 ### 3.2 开放局域网 / 公网监听
@@ -107,8 +107,8 @@ VB Decompiler 未提供项目级撤销/回滚 API，**请务必先备份原始 e
 
 | 前缀 | 含义 | 可见性 |
 |---|---|---|
-| `vb_read_*` | 只读操作（读取项目结构、源码、反编译信息、元数据） | 始终出现在 `tools/list` |
-| `vb_write_*` | 修改操作（保存、修改工程、覆盖导出、清空资源） | 仅在开启写入权限后出现在 `tools/list` |
+| `vbd_read_*` | 只读操作（读取项目结构、源码、反编译信息、元数据） | 始终出现在 `tools/list` |
+| `vbd_write_*` | 修改操作（保存、修改工程、覆盖导出、清空资源） | 仅在开启写入权限后出现在 `tools/list` |
 
 **双重校验**（即使客户端绕过 `listTools` 也无法越权）：
 
@@ -127,16 +127,16 @@ VB Decompiler 未提供项目级撤销/回滚 API，**请务必先备份原始 e
 
 ## 5. 数据与日志
 
-- **日志**：默认关闭。设置 `VBMCP_DEBUG_LOG=1` 后写入 `%TEMP%\vbmcp.log`，
-  分级为 ERROR/WARN/INFO/DEBUG（`VBMCP_LOG_LEVEL`）；单文件超过 10MB 时在
-  进程首次写入时轮转为 `vbmcp.log.old`（只保留一代）。
+- **日志**：默认关闭。设置 `VBDMCP_DEBUG_LOG=1` 后写入 `%TEMP%\vbdmcp.log`，
+  分级为 ERROR/WARN/INFO/DEBUG（`VBDMCP_LOG_LEVEL`）；单文件超过 10MB 时在
+  进程首次写入时轮转为 `vbdmcp.log.old`（只保留一代）。
   日志内容**仅包含**：连接建立/断开、工具名、权限判定、错误分类、耗时、线程 id。
   **不写入任何项目源码、反编译文本、字符串常量或文件内容。**
 - **内存**：所有缓冲区均为进程内分配，进程退出即回收。唯一例外是引擎 `Set` 路径：
   按官方 SDK 约定（demo 亦如此），传给引擎的字符串由引擎持有、故意不释放。
-  **泄漏量与写入文本的大小成正比**——`vb_write_*` 每次调用都会常驻一份副本，
-  `vb_write_project_text` 单次上限 16MB，AI 客户端反复写入大文本会累积到数百 MB。
-  插件对累计泄漏量分级告警（1MB / 16MB / 64MB / 256MB，见 `%TEMP%\vbmcp.log` 的 WARN），
+  **泄漏量与写入文本的大小成正比**——`vbd_write_*` 每次调用都会常驻一份副本，
+  `vbd_write_project_text` 单次上限 16MB，AI 客户端反复写入大文本会累积到数百 MB。
+  插件对累计泄漏量分级告警（1MB / 16MB / 64MB / 256MB，见 `%TEMP%\vbdmcp.log` 的 WARN），
   进程退出时由系统整体回收。
 - **磁盘**：本插件**不写任何项目文件**。所有写入都作用于 VB Decompiler 内存中的工程数据，
   由用户自己在 VB Decompiler 里决定是否保存/导出。
@@ -152,7 +152,7 @@ VB Decompiler 未提供项目级撤销/回滚 API，**请务必先备份原始 e
 2. 写入权限按需开关；关闭 VB Decompiler 前到设置窗体「服务设置」页确认「权限模式」显示为「只读」。
 3. 不要在 `CorsOrigins` 中填写 `*` 或任何你不确定的 origin（`*` 会被忽略，但请保持这种警惕）。
 4. 用完 MCP 后关闭"启用 MCP 服务器"，或直接退出 VB Decompiler（授权状态随进程结束清零）。
-5. 定期检查 `%TEMP%\vbmcp.log` 中的权限拒绝事件（`session denied by user`、
+5. 定期检查 `%TEMP%\vbdmcp.log` 中的权限拒绝事件（`session denied by user`、
    `write tool in read-only mode`），排查异常调用来源。
 
 ---

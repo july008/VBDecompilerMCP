@@ -23,7 +23,7 @@
  *         避免其它线程正在查表时被 I18n_Clear() 释放。
  */
 #include "i18n.h"
-#include "vbmcp.h"          /* vbmcp_logf / vbmcp_alloc */
+#include "vbdmcp.h"          /* vbdmcp_logf / vbdmcp_alloc */
 #include "khash.h"
 #include "yyjson.h"
 
@@ -117,8 +117,8 @@ const char *to_ansi(const char *utf8)
 static int g_freed_pairs = 0;
 static void free_pair(const char *key, void *val, void *user)
 {
-    vbmcp_free((void *)(size_t)key);
-    vbmcp_free(val);            /* vbmcp_free(NULL) 安全：被拒绝的译文存 NULL */
+    vbdmcp_free((void *)(size_t)key);
+    vbdmcp_free(val);            /* vbdmcp_free(NULL) 安全：被拒绝的译文存 NULL */
     if (user) *((int *)user) += 1;
 }
 
@@ -174,7 +174,7 @@ static void release_all_tables()
  *   sig       规范化占位符序列（如 "%d%s%zu"），用于比对译文与原文；
  *   convs     转换符个数；
  *   args      实际消耗的实参个数（转换符 + '*' 宽度/精度各额外吃 1 个）；
- *   parseable=false 表示串里有"字面量 %"(如帮助文本 "%TEMP%\\vbmcp.log")，
+ *   parseable=false 表示串里有"字面量 %"(如帮助文本 "%TEMP%\\vbdmcp.log")，
  *             此时不做占位符校验，避免误伤正常文案。
  * ============================================================ */
 struct FmtInfo {
@@ -253,28 +253,28 @@ bool build_table(yyjson_doc *doc)
 
         char *val = nullptr;
         if (I18n_FormatCompatible(k_text, v_text)) {
-            val = vbmcp_strdup(v_text);      /* 含 ""：故意留空 */
+            val = vbdmcp_strdup(v_text);      /* 含 ""：故意留空 */
         } else if (v_text[0] == '\0') {
-            vbmcp_logf(VBMCP_LOG_WARN,
+            vbdmcp_logf(VBDMCP_LOG_WARN,
                        "i18n: empty translation rejected (msgid has placeholders): %s",
                        k_text);
         } else {
-            vbmcp_logf(VBMCP_LOG_WARN,
+            vbdmcp_logf(VBDMCP_LOG_WARN,
                        "i18n: placeholder mismatch, translation rejected: %s", k_text);
         }
 
-        char *key = vbmcp_strdup(k_text);
+        char *key = vbdmcp_strdup(k_text);
         if (!key || (v_text[0] && !val)) {
-            if (key) vbmcp_free(key);
-            if (val) vbmcp_free(val);
+            if (key) vbdmcp_free(key);
+            if (val) vbdmcp_free(val);
             continue;                       /* key 都没建成功，整条丢弃 */
         }
 
         int ret = 0;
         kh_put(table, key, val, &ret);
         if (ret == 0) {          /* 极端情况：插入失败，避免泄漏 */
-            vbmcp_free(key);
-            vbmcp_free(val);
+            vbdmcp_free(key);
+            vbdmcp_free(val);
         }
     }
     /* 表建好后再原子发布：读者要么看到旧表，要么看到完整新表。 */
@@ -287,16 +287,16 @@ bool load_from_resource(const char *rsrc_name)
 {
     if (!rsrc_name || !*rsrc_name) return false;
 
-    HMODULE hSelf = vbmcp_self_module();
+    HMODULE hSelf = vbdmcp_self_module();
     if (!hSelf) {
-        vbmcp_logf(VBMCP_LOG_ERROR, "i18n: GetModuleHandleExA(from address) failed err=%lu",
+        vbdmcp_logf(VBDMCP_LOG_ERROR, "i18n: GetModuleHandleExA(from address) failed err=%lu",
                    GetLastError());
         return false;
     }
 
     HRSRC hRsrc = FindResourceA(hSelf, rsrc_name, RT_RCDATA);
     if (!hRsrc) {
-        vbmcp_logf(VBMCP_LOG_ERROR, "i18n: RCDATA '%s' not found in module", rsrc_name);
+        vbdmcp_logf(VBDMCP_LOG_ERROR, "i18n: RCDATA '%s' not found in module", rsrc_name);
         return false;
     }
     HGLOBAL hGlobal = LoadResource(hSelf, hRsrc);
@@ -311,7 +311,7 @@ bool load_from_resource(const char *rsrc_name)
     yyjson_doc *doc = yyjson_read(buf.c_str(), buf.size(),
                                   YYJSON_READ_NOFLAG);
     if (!doc) {
-        vbmcp_logf(VBMCP_LOG_ERROR, "i18n: %s parse failed (resource, %u bytes)",
+        vbdmcp_logf(VBDMCP_LOG_ERROR, "i18n: %s parse failed (resource, %u bytes)",
                    rsrc_name, len);
         return false;
     }
@@ -331,7 +331,7 @@ struct LangEntry {
     I18nLang     lang;
     const char  *registry_name;   /* CustomLanguage 的值 */
     const char  *alt_name;       /* 宿主里的别名（可空） */
-    const char  *code;           /* 两字母/带地区代码，用于日志与 VBMCP_LANG */
+    const char  *code;           /* 两字母/带地区代码，用于日志与 VBDMCP_LANG */
     const char  *resource;       /* RCDATA 资源名；NULL = 暂无语言包 */
 };
 
@@ -430,7 +430,7 @@ I18nLang I18n_LangFromName(const char *name)
             return kLangs[i].lang;
         }
     }
-    /* 也接受两字母代码（VBMCP_LANG=ja / pt-BR 这种写法） */
+    /* 也接受两字母代码（VBDMCP_LANG=ja / pt-BR 这种写法） */
     for (int i = 0; i < n; i++) {
         if (_stricmp(buf, kLangs[i].code) == 0) return kLangs[i].lang;
     }
@@ -470,7 +470,7 @@ int I18n_FormatArity(const char *fmt)
 
 void I18n_LogFormatMismatch(const char *fmt, int need, int got)
 {
-    vbmcp_logf(VBMCP_LOG_ERROR,
+    vbdmcp_logf(VBDMCP_LOG_ERROR,
                "i18n: format/argument mismatch (needs %d, got %d): %s -- "
                "refusing to format (would read garbage from the stack)",
                need, got, fmt ? fmt : "(null)");
@@ -503,7 +503,7 @@ int I18n_SetMode(I18nMode mode)
 
     const char *rsrc = I18n_LangResourceName(mode);
     if (rsrc && *rsrc && load_from_resource(rsrc)) {
-        vbmcp_logf(VBMCP_LOG_INFO, "i18n: %s pack loaded from %s (%d entries)",
+        vbdmcp_logf(VBDMCP_LOG_INFO, "i18n: %s pack loaded from %s (%d entries)",
                    I18n_LangCode(mode), g_source.c_str(), I18n_TranslatedCount());
         return 1;
     }
@@ -512,11 +512,11 @@ int I18n_SetMode(I18nMode mode)
      * （msgid 就是英文原文）。不做磁盘回退 —— 否则开发目录里的 lang_res\zh.json
      * 会掩盖"RCDATA 没链进 DLL"这种打包问题。 */
     if (!rsrc || !*rsrc) {
-        vbmcp_logf(VBMCP_LOG_INFO,
+        vbdmcp_logf(VBDMCP_LOG_INFO,
                    "i18n: '%s' has no language pack yet, using msgid (English)",
                    I18n_LangName(mode));
     } else {
-        vbmcp_logf(VBMCP_LOG_ERROR,
+        vbdmcp_logf(VBDMCP_LOG_ERROR,
                    "i18n: pack unavailable for '%s' (RCDATA '%s' not found), "
                    "using msgid (English)", I18n_LangName(mode), rsrc);
     }
@@ -526,14 +526,14 @@ int I18n_SetMode(I18nMode mode)
 
 void I18n_Refresh()
 {
-    /* 调试/测试覆盖：环境变量 VBMCP_LANG 优先于注册表 CustomLanguage。
+    /* 调试/测试覆盖：环境变量 VBDMCP_LANG 优先于注册表 CustomLanguage。
      * 取值可以是注册表里的原文（如 "ChineseSimplified"）或两字母代码（zh/ja/pt-BR）。 */
     char env[64] = {0};
-    if (GetEnvironmentVariableA("VBMCP_LANG", env, sizeof(env)) > 0) {
+    if (GetEnvironmentVariableA("VBDMCP_LANG", env, sizeof(env)) > 0) {
         const I18nLang want_env = I18n_LangFromName(env);
         if (want_env != g_mode.load() || (want_env != I18N_LANG_EN && !g_trans.load())) {
             I18n_SetMode(want_env);
-            vbmcp_logf(VBMCP_LOG_INFO, "i18n: language=%s (from VBMCP_LANG='%s')",
+            vbdmcp_logf(VBDMCP_LOG_INFO, "i18n: language=%s (from VBDMCP_LANG='%s')",
                        I18n_LangCode(I18n_GetMode()), env);
         }
         return;
@@ -552,7 +552,7 @@ void I18n_Refresh()
         return;                       /* 未变化：不重复加载 */
     }
     I18n_SetMode(want);
-    vbmcp_logf(VBMCP_LOG_INFO, "i18n: language=%s name='%s' (reg='%s', err=%ld, pack=%s)",
+    vbdmcp_logf(VBDMCP_LOG_INFO, "i18n: language=%s name='%s' (reg='%s', err=%ld, pack=%s)",
                I18n_LangCode(I18n_GetMode()), I18n_LangName(I18n_GetMode()),
                val, (long)st, g_source.c_str());
 }

@@ -5,7 +5,7 @@
  *   1. 源码里所有展示字符串统一写成 _("msgid")，msgid 用英文原文；
  *      中文译文放在 lang_res/zh.json，随 DLL 资源嵌入。
  *   2. 不加载外部 langpack.dll：zh.json 通过 .rc 以 RCDATA("JSON_ZH") 链进
- *      vbmcp.dll，运行时用 GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)
+ *      vbdmcp.dll，运行时用 GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)
  *      传入本模块函数地址取得"当前 DLL 自身模块句柄"，再 FindResource/LoadResource。
  *   3. 字符串查找走 khash（src/khash.h）哈希表；I18n_Clear() 释放表内 strdup
  *      的字符串，避免内存泄漏（DLL 卸载前会调用一次）。
@@ -19,10 +19,10 @@
  * 约定说明：
  *   - `_()`  返回 **UTF-8**，用于 MCP JSON 报文、日志等非 ANSI 场景；
  *   - `_A()` 是 `_()` 的 ANSI(GBK) 版本，用于 MessageBoxA / SetDlgItemTextA /
- *     CreateWindowExA 等 Win32 A 系列接口（与旧 vbmcp_t() 语义一致）；
+ *     CreateWindowExA 等 Win32 A 系列接口（与旧 vbdmcp_t() 语义一致）；
  *   - `_F()`  = 先翻译再格式化（UTF-8）；`_AF()` = 先翻译再格式化（GBK）。
  *     临时结果放在轮转缓冲池中，**只能立即使用**，不要跨语句长期持有。
- *   - 工具名（vb_read_* / vb_write_*）是协议标识符，禁止翻译。
+ *   - 工具名（vbd_read_* / vbd_write_*）是协议标识符，禁止翻译。
  *
  * 语言包取值的语义（与 tools/extract_i18n.py 一并维护，改动请同时改两边）：
  *      键缺失 或 值为 null  → 未翻译，`_()` 返回 msgid 本身（英文原文）
@@ -31,8 +31,8 @@
  *                             并回退原文（留空会丢参数导致错参/崩溃）
  *      非空文本             → 译文；占位符与 msgid 不一致时整条拒绝并回退原文
  */
-#ifndef VBMCP_I18N_H
-#define VBMCP_I18N_H
+#ifndef VBDMCP_I18N_H
+#define VBDMCP_I18N_H
 
 #include <stdarg.h>
 
@@ -51,7 +51,7 @@ extern "C" {
  *
  * 目前只有简体中文嵌了语言包（JSON_ZH）；其余语言先占位，
  * 没有语言包时 `_()` 直接返回 msgid（即英文原文），不会显示空白。
- * 将来新增语言只需：加一个 lang_res/<xx>.json + 在 res/vbmcp.rc 里加一条
+ * 将来新增语言只需：加一个 lang_res/<xx>.json + 在 res/vbdmcp.rc 里加一条
  * RCDATA + 在 I18n_LangResourceName() 里补一个名字。
  * ============================================================ */
 typedef enum {
@@ -96,7 +96,7 @@ I18nLang    I18n_LangFromName(const char *name);
 /* 枚举 → 注册表里使用的字符串（未在列表里的语言回退成 "English"） */
 const char *I18n_LangName(I18nLang lang);
 
-/* 枚举 → 两字母代码（日志 / VBMCP_LANG 环境变量用，如 zh、ja、pt-BR） */
+/* 枚举 → 两字母代码（日志 / VBDMCP_LANG 环境变量用，如 zh、ja、pt-BR） */
 const char *I18n_LangCode(I18nLang lang);
 
 /* 该语言是否已嵌入语言包；目前只有 zh-CN 为真 */
@@ -108,7 +108,7 @@ const char *I18n_LangResourceName(I18nLang lang);
 /* ---------------- 生命周期 ---------------- */
 
 /* 按注册表 ...\VB Decompiler\Options\CustomLanguage 选择语言
- * （也接受环境变量 VBMCP_LANG 覆盖，取值同上）。
+ * （也接受环境变量 VBDMCP_LANG 覆盖，取值同上）。
  * 每次调用都会重载语言包（设置窗体打开前用户可能改过语言）。 */
 void I18n_Refresh(void);
 
@@ -230,4 +230,4 @@ char *I18n_FormatCheckedAnsi(const char *fmt, Args... args)
 }
 #endif
 
-#endif /* VBMCP_I18N_H */
+#endif /* VBDMCP_I18N_H */

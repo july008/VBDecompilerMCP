@@ -1,8 +1,8 @@
-// vbmcp_ids.h - GENERATED FILE, do not edit by hand.
+// vbdmcp_ids.h - GENERATED FILE, do not edit by hand.
 //
 // Source of truth: the IDC_/IDD_ defines in the resource script
-//   res/vbmcp.rc       (hand-written layout)
-//   res/resource.h     (generated when vbmcp.rc is edited in the VS resource editor)
+//   res/vbdmcp.rc       (hand-written layout)
+//   res/resource.h     (generated when vbdmcp.rc is edited in the VS resource editor)
 // Regenerate after changing an ID:  python tools/gen_ids_header.py
 // Verify consistency:               python tools/gen_ids_header.py --check
 //
@@ -15,8 +15,8 @@
 // lexer is not DBCS-safe and treats apostrophes inside comments as string
 // delimiters.
 
-#ifndef VBMCP_IDS_H
-#define VBMCP_IDS_H
+#ifndef VBDMCP_IDS_H
+#define VBDMCP_IDS_H
 #define IDC_CHK_ENABLE           1001
 #define IDC_TXT_BIND             1002
 #define IDC_SPIN_PORT            1003
@@ -48,8 +48,8 @@
 #define IDC_TXT_SNIPPET          1035
 #define IDC_LBL_STEPS            1036
 #define IDC_TXT_STEPS            1037
-#define IDD_VBMCP_OPTIONS        2000
+#define IDD_VBDMCP_OPTIONS       2000
 #define IDD_PAGE_SERVER          2001
 #define IDD_PAGE_ACCESS          2002
 
-#endif // VBMCP_IDS_H
+#endif // VBDMCP_IDS_H

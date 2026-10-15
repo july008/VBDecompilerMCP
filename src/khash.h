@@ -17,8 +17,8 @@
  *
  * 算法：FNV-1a + 开放寻址（线性探测）+ 负载因子 0.75 自动扩容。
  */
-#ifndef VBMCP_KHASH_H
-#define VBMCP_KHASH_H
+#ifndef VBDMCP_KHASH_H
+#define VBDMCP_KHASH_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -195,4 +195,4 @@ static void kh_foreach(khash_t *h, kh_foreach_fn fn, void *user)
 }
 #endif
 
-#endif /* VBMCP_KHASH_H */
+#endif /* VBDMCP_KHASH_H */

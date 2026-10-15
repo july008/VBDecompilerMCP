@@ -15,7 +15,7 @@
  *   底部：恢复默认设置 / 帮助 / 确定 / 取消（两个属性页共用）
  *
  * 实现要点：
- *   - 控件树来自 res/vbmcp.rc：shell 模板 2000 只有 tab + 底部按钮；两个
+ *   - 控件树来自 res/vbdmcp.rc：shell 模板 2000 只有 tab + 底部按钮；两个
  *     属性页各自是独立模板（2001 / 2002），因为 rc 的对话框模板是扁平的，
  *     一个模板表达不了"控件属于哪个属性页"。运行期把页窗口作为子窗口创建
  *     并停靠在 tab 显示区，于是资源编辑器里控件也是按页分组的。
@@ -28,9 +28,10 @@
  *
  * 可重入性：单实例，重复点击菜单只前置已开窗体。
  */
-#include "vbmcp.h"
-#include "vbmcp_ids.h"      /* 控件 ID（与 res/vbmcp.rc 共用同一份定义） */
+#include "vbdmcp.h"
+#include "vbdmcp_ids.h"      /* 控件 ID（与 res/vbdmcp.rc 共用同一份定义） */
 #include "i18n.h"
+#include "mcp_tools.h"       /* mcp_local_tool_count（帮助文本动态显示工具数） */
 #include <commctrl.h>    /* SysTabControl32 / TCITEM / ICC_TAB_CLASSES */
 #include <stdio.h>
 #include <strsafe.h>
@@ -76,7 +77,7 @@ static const ai_guide_t kAiGuides[] = {
         /* config (EN) */
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\",\n"
         "      \"disabled\": false\n"
@@ -86,7 +87,7 @@ static const ai_guide_t kAiGuides[] = {
         /* config (ZH) */
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\",\n"
         "      \"disabled\": false\n"
@@ -106,7 +107,7 @@ static const ai_guide_t kAiGuides[] = {
         "1. Quit CodeBuddy first (so the file is not overwritten);\n"
         "2. Open mcp.json in a text editor and merge the snippet;\n"
         "3. Save and restart CodeBuddy;\n"
-        "4. Confirm \"vbmcp\" shows as connected in CodeBuddy's MCP panel.\n"
+        "4. Confirm \"vbdmcp\" shows as connected in CodeBuddy's MCP panel.\n"
         "\n"
         "Docs: https://www.codebuddy.cn -> help center (MCP section)",
         /* steps (ZH) */
@@ -121,7 +122,7 @@ static const ai_guide_t kAiGuides[] = {
         "1. 先关闭 CodeBuddy（避免配置被覆盖）；\n"
         "2. 用文本编辑器打开 mcp.json，合并上方片段；\n"
         "3. 保存后重启 CodeBuddy；\n"
-        "4. 在 CodeBuddy 的 MCP 管理面板中确认 vbmcp 显示已连接。\n"
+        "4. 在 CodeBuddy 的 MCP 管理面板中确认 vbdmcp 显示已连接。\n"
         "\n"
         "文档：https://www.codebuddy.cn -> 帮助中心（MCP 章节）"
     },
@@ -131,7 +132,7 @@ static const ai_guide_t kAiGuides[] = {
         "%APPDATA%\\Code\\User\\mcp.json",
         "{\n"
         "  \"servers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -139,7 +140,7 @@ static const ai_guide_t kAiGuides[] = {
         "}",
         "{\n"
         "  \"servers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -156,7 +157,7 @@ static const ai_guide_t kAiGuides[] = {
         "1. Make sure your VS Code supports MCP (Copilot Chat / MCP since 2025);\n"
         "2. Paste the snippet into mcp.json;\n"
         "3. Run \"MCP: Reload Servers\" from the command palette, or reload the window;\n"
-        "4. Confirm vbmcp status is connected in the MCP panel.\n"
+        "4. Confirm vbdmcp status is connected in the MCP panel.\n"
         "\n"
         "Docs: https://code.visualstudio.com/docs/copilot/chat/mcp-servers",
         "上方片段为用户级配置。若希望随项目共享，请改用\n"
@@ -170,7 +171,7 @@ static const ai_guide_t kAiGuides[] = {
         "1. 确保当前 VS Code 支持 MCP（2025 版起的 Copilot Chat / MCP 工具支持）；\n"
         "2. 把上方片段粘贴进 mcp.json；\n"
         "3. 命令面板执行 \"MCP: Reload Servers\" 或重启窗口；\n"
-        "4. 在 MCP 面板确认 vbmcp 状态为已连接。\n"
+        "4. 在 MCP 面板确认 vbdmcp 状态为已连接。\n"
         "\n"
         "文档：https://code.visualstudio.com/docs/copilot/chat/mcp-servers"
     },
@@ -180,7 +181,7 @@ static const ai_guide_t kAiGuides[] = {
         "%USERPROFILE%\\.cursor\\mcp.json",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -188,7 +189,7 @@ static const ai_guide_t kAiGuides[] = {
         "}",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -201,7 +202,7 @@ static const ai_guide_t kAiGuides[] = {
         "  manually Enable it once in Cursor's MCP list.\n"
         "\n"
         "Steps:\n"
-        "1. After adding, the tools list in the Cursor chat should include vbmcp;\n"
+        "1. After adding, the tools list in the Cursor chat should include vbdmcp;\n"
         "2. If the list is empty, restart Cursor or reload the window.\n"
         "\n"
         "Docs: https://docs.cursor.com (search \"Model Context Protocol\")",
@@ -212,7 +213,7 @@ static const ai_guide_t kAiGuides[] = {
         "  在 Cursor 设置的 MCP 列表里手动 Enable 一次。\n"
         "\n"
         "操作步骤：\n"
-        "1. 添加后回到 Cursor 对话框，工具列表中应出现 vbmcp；\n"
+        "1. 添加后回到 Cursor 对话框，工具列表中应出现 vbdmcp；\n"
         "2. 若列表空白，尝试重启 Cursor 或重新加载窗口。\n"
         "\n"
         "文档：https://docs.cursor.com （搜索 \"Model Context Protocol\"）"
@@ -223,7 +224,7 @@ static const ai_guide_t kAiGuides[] = {
         "%APPDATA%\\Trae\\User\\mcp.json",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -231,7 +232,7 @@ static const ai_guide_t kAiGuides[] = {
         "}",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -264,7 +265,7 @@ static const ai_guide_t kAiGuides[] = {
         "%USERPROFILE%\\.workbuddy\\mcp.json",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -272,7 +273,7 @@ static const ai_guide_t kAiGuides[] = {
         "}",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -286,7 +287,7 @@ static const ai_guide_t kAiGuides[] = {
         "Steps:\n"
         "1. Quit WorkBuddy;\n"
         "2. Merge the snippet into mcp.json and save;\n"
-        "3. Restart WorkBuddy; confirm vbmcp is connected in the MCP panel.\n"
+        "3. Restart WorkBuddy; confirm vbdmcp is connected in the MCP panel.\n"
         "\n"
         "Note: WorkBuddy's MCP config keys and paths can differ between minor\n"
         "versions. If anything fails, check Settings -> MCP for the current schema.",
@@ -309,7 +310,7 @@ static const ai_guide_t kAiGuides[] = {
         "%APPDATA%\\Claude\\claude_desktop_config.json",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -317,7 +318,7 @@ static const ai_guide_t kAiGuides[] = {
         "}",
         "{\n"
         "  \"mcpServers\": {\n"
-        "    \"vbmcp\": {\n"
+        "    \"vbdmcp\": {\n"
         "      \"type\": \"http\",\n"
         "      \"url\": \"" URL_PLACEHOLDER "\"\n"
         "    }\n"
@@ -331,7 +332,7 @@ static const ai_guide_t kAiGuides[] = {
         "Steps:\n"
         "1. Edit the config file above and merge the snippet;\n"
         "2. Fully quit and restart Claude Desktop;\n"
-        "3. Confirm the tools are available in the chat (or vbmcp shows up under\n"
+        "3. Confirm the tools are available in the chat (or vbdmcp shows up under\n"
         "   Settings -> Installed connectors).\n"
         "\n"
         "Docs: https://support.anthropic.com (search \"Claude Desktop MCP\")",
@@ -343,7 +344,7 @@ static const ai_guide_t kAiGuides[] = {
         "操作步骤：\n"
         "1. 编辑上述配置文件，合并本片段；\n"
         "2. 完全退出并重启 Claude Desktop；\n"
-        "3. 在对话中确认工具可用（或 设置 -> 已安装连接器 里看到 vbmcp）。\n"
+        "3. 在对话中确认工具可用（或 设置 -> 已安装连接器 里看到 vbdmcp）。\n"
         "\n"
         "文档：https://support.anthropic.com （搜索 \"Claude Desktop MCP\"）"
     },
@@ -353,10 +354,10 @@ static const ai_guide_t kAiGuides[] = {
         "%USERPROFILE%\\.claude.json",
         /* config (EN) */
         "# write to ~/.claude.json:\n"
-        "claude mcp add vbmcp --transport http \"" URL_PLACEHOLDER "\"\n",
+        "claude mcp add vbdmcp --transport http \"" URL_PLACEHOLDER "\"\n",
         /* config (ZH) */
         "# 推荐用 CLI 添加（写入 ~/.claude.json，自动生效）：\n"
-        "claude mcp add vbmcp --transport http \"" URL_PLACEHOLDER "\"\n",
+        "claude mcp add vbdmcp --transport http \"" URL_PLACEHOLDER "\"\n",
         /* steps (EN) */
         "Steps:\n"
         "1. Run one of the commands above in a terminal;\n"
@@ -380,14 +381,14 @@ static const ai_guide_t kAiGuides[] = {
         "OpenAI Codex",
         "%USERPROFILE%\\.codex\\config.toml",
         "%USERPROFILE%\\.codex\\config.toml",
-        "[mcp_servers.vbmcp]\n"
+        "[mcp_servers.vbdmcp]\n"
         "type = \"http\"\n"
         "url = \"" URL_PLACEHOLDER "\"",
-        "[mcp_servers.vbmcp]\n"
+        "[mcp_servers.vbdmcp]\n"
         "type = \"http\"\n"
         "url = \"" URL_PLACEHOLDER "\"",
         "Option 1 (CLI, recommended):\n"
-        "  codex mcp add vbmcp -- " URL_PLACEHOLDER "\n"
+        "  codex mcp add vbdmcp -- " URL_PLACEHOLDER "\n"
         "Option 2 (manual config.toml): append the snippet on the left to the end of\n"
         "  the config file above (or <project-dir>\\.codex\\config.toml).\n"
         "\n"
@@ -398,7 +399,7 @@ static const ai_guide_t kAiGuides[] = {
         "\n"
         "Docs: https://github.com/openai/codex (README -> MCP section)",
         "方式一（CLI，推荐）：\n"
-        "  codex mcp add vbmcp -- " URL_PLACEHOLDER "\n"
+        "  codex mcp add vbdmcp -- " URL_PLACEHOLDER "\n"
         "方式二（手写 config.toml）：把左侧片段追加到上述配置文件末尾\n"
         "  （或 <项目目录>\\.codex\\config.toml）。\n"
         "\n"
@@ -437,7 +438,7 @@ static HFONT g_hUiFont    = NULL;
  * DPI 与布局
  *
  * - 字号 12pt 并随系统 DPI 缩放（S()）；
- * - 控件树来自 res/vbmcp.rc 的 IDD_VBMCP_OPTIONS 模板；
+ * - 控件树来自 res/vbdmcp.rc 的 IDD_VBDMCP_OPTIONS 模板；
  * - 几何由 layout_dialog() 按当前客户区实时计算，WM_SIZE 重排，
  *   所以窗体可自由缩放（模板已带 WS_THICKFRAME）。
  * ============================================================ */
@@ -590,7 +591,7 @@ static char *replace_url_placeholder(const char *src, const char *url)
     size_t src_len = strlen(src);
     size_t ph_len  = strlen(URL_PLACEHOLDER);
     if (ph_len == 0 || src_len < ph_len) {
-        char *r = (char *)vbmcp_alloc(src_len + 1);
+        char *r = (char *)vbdmcp_alloc(src_len + 1);
         if (!r) return NULL;
         memcpy(r, src, src_len + 1);
         return r;
@@ -600,7 +601,7 @@ static char *replace_url_placeholder(const char *src, const char *url)
     while ((p = strstr(p, URL_PLACEHOLDER)) != NULL) { count++; p += ph_len; }
     size_t url_len = strlen(url);
     size_t out_len = src_len + count * url_len - count * ph_len;
-    char *out = (char *)vbmcp_alloc(out_len + 1);
+    char *out = (char *)vbdmcp_alloc(out_len + 1);
     if (!out) return NULL;
     char *dst = out;
     const char *s = src;
@@ -629,7 +630,7 @@ static char *replace_url_placeholder(const char *src, const char *url)
 static void set_text_utf8(HWND hCtl, const char *utf8)
 {
     if (!hCtl) return;
-    char *gbk = vbmcp_str_to_gbk(utf8 ? utf8 : "");
+    char *gbk = vbdmcp_str_to_gbk(utf8 ? utf8 : "");
     const char *src = gbk ? gbk : "";
 
     size_t n_count = 0;
@@ -639,7 +640,7 @@ static void set_text_utf8(HWND hCtl, const char *utf8)
         SetWindowTextA(hCtl, src);
     } else {
         size_t in_len = strlen(src);
-        char *fixed = (char *)vbmcp_alloc(in_len + n_count + 1);
+        char *fixed = (char *)vbdmcp_alloc(in_len + n_count + 1);
         if (!fixed) {
             SetWindowTextA(hCtl, src);
         } else {
@@ -650,10 +651,10 @@ static void set_text_utf8(HWND hCtl, const char *utf8)
             }
             *dst = '\0';
             SetWindowTextA(hCtl, fixed);
-            vbmcp_free(fixed);
+            vbdmcp_free(fixed);
         }
     }
-    if (gbk) vbmcp_free(gbk);
+    if (gbk) vbdmcp_free(gbk);
 }
 
 /* ============================================================
@@ -680,11 +681,11 @@ static char *build_base_url(void)
 
     char *b = bind;
     while (*b == ' ' || *b == '\t') b++;
-    if (!*b) _snprintf_s(bind, sizeof(bind), _TRUNCATE, "%s", VBMCP_DEFAULT_BIND);
+    if (!*b) _snprintf_s(bind, sizeof(bind), _TRUNCATE, "%s", VBDMCP_DEFAULT_BIND);
 
     long long port = atoi(port_txt);
-    if (port <= 0 || port > 65535) port = VBMCP_DEFAULT_PORT;
-    char *url = (char *)vbmcp_alloc(128);
+    if (port <= 0 || port > 65535) port = VBDMCP_DEFAULT_PORT;
+    char *url = (char *)vbdmcp_alloc(128);
     if (!url) return NULL;
     _snprintf_s(url, 128, _TRUNCATE, "http://%s:%lld", bind, port);
     return url;
@@ -695,10 +696,10 @@ static char *build_mcp_url(void)
 {
     char *base = build_base_url();
     if (!base) return NULL;
-    char *mcp = (char *)vbmcp_alloc(160);
-    if (!mcp) { vbmcp_free(base); return NULL; }
+    char *mcp = (char *)vbdmcp_alloc(160);
+    if (!mcp) { vbdmcp_free(base); return NULL; }
     _snprintf_s(mcp, 160, _TRUNCATE, "%s/mcp", base);
-    vbmcp_free(base);
+    vbdmcp_free(base);
     return mcp;
 }
 
@@ -708,8 +709,8 @@ static char *expand_env_path(const char *src)
     if (!src || !*src) return NULL;
     char buf[1024] = {0};
     DWORD n = ExpandEnvironmentStringsA(src, buf, (DWORD)sizeof(buf));
-    if (n > 0 && n <= sizeof(buf)) return vbmcp_strdup(buf);
-    return vbmcp_strdup(src);
+    if (n > 0 && n <= sizeof(buf)) return vbdmcp_strdup(buf);
+    return vbdmcp_strdup(src);
 }
 
 /* ============================================================
@@ -728,26 +729,26 @@ static void update_access_page(void)
 
     char *base = build_base_url();
     set_text_utf8(find_ctl(IDC_TXT_URL), base ? base : url);
-    if (base) vbmcp_free(base);
+    if (base) vbdmcp_free(base);
 
     const char *path_raw = zh ? g->path_zh : g->path_en;
     if (path_raw && *path_raw) {
         char *expanded = expand_env_path(path_raw);
         set_text_utf8(find_ctl(IDC_TXT_PATH), expanded ? expanded : path_raw);
-        if (expanded) vbmcp_free(expanded);
+        if (expanded) vbdmcp_free(expanded);
     } else {
         set_text_utf8(find_ctl(IDC_TXT_PATH), _("Add it directly in the client UI (no config file needed)"));
     }
 
     char *config = replace_url_placeholder(zh ? g->config_zh : g->config_en, url);
     set_text_utf8(find_ctl(IDC_TXT_SNIPPET), config ? config : "");
-    if (config) vbmcp_free(config);
+    if (config) vbdmcp_free(config);
 
     char *steps = replace_url_placeholder(zh ? g->steps_zh : g->steps_en, url);
     set_text_utf8(find_ctl(IDC_TXT_STEPS), steps ? steps : "");
-    if (steps) vbmcp_free(steps);
+    if (steps) vbdmcp_free(steps);
 
-    vbmcp_free(mcp_url);
+    vbdmcp_free(mcp_url);
 }
 
 /* ============================================================
@@ -779,7 +780,7 @@ static void refresh_mode_label(void)
 
 static void refresh_status(void)
 {
-    const int running = vbmcp_server_is_running();
+    const int running = vbdmcp_server_is_running();
     set_text(IDC_LBL_STATUS, running ? _A("running") : _A("stopped"));
     refresh_mode_label();
 }
@@ -813,13 +814,13 @@ static void populate_ai_combo(void)
 static void init_dialog(void)
 {
     int port = g_port.load();
-    int allow_write = VBMCP_DEFAULT_ALLOW_WRITE;
+    int allow_write = VBDMCP_DEFAULT_ALLOW_WRITE;
     char bind[64];
-    vbmcp_config_load(&port, bind, sizeof(bind), &allow_write);
+    vbdmcp_config_load(&port, bind, sizeof(bind), &allow_write);
 
     g_port.store(port);
     g_allow_write.store(allow_write);
-    vbmcp_set_bind_address(bind);
+    vbdmcp_set_bind_address(bind);
 
     set_check(IDC_CHK_ENABLE, g_enabled.load());
     set_check(IDC_CHK_ALLOW_WRITE, g_allow_write.load());
@@ -827,7 +828,7 @@ static void init_dialog(void)
     /* 局域网高级选项默认隐藏（未勾选）：绑定框只读 + 禁用，强制回环监听 */
     const int lan_on = !is_loopback_bind(bind);
     set_check(IDC_CHK_LAN_ADVANCED, lan_on);
-    set_text(IDC_TXT_BIND, lan_on ? bind : VBMCP_DEFAULT_BIND);
+    set_text(IDC_TXT_BIND, lan_on ? bind : VBDMCP_DEFAULT_BIND);
     enable_ctl(IDC_TXT_BIND, lan_on ? TRUE : FALSE);
 
     /* 端口编辑框是端口值的唯一事实来源；旁边的 up-down（msctls_updown32）
@@ -840,7 +841,7 @@ static void init_dialog(void)
     populate_ai_combo();
 
     set_text_utf8(find_ctl(IDC_TXT_SEC_TIP),
-        _("Read-only is the default: the server only listens on 127.0.0.1, sends no CORS headers, and vb_write_* tools are hidden from tools/list. Enabling write access lets an AI agent modify the decompiled project (including tools that replace the whole project text) - back up your files first. LAN access exposes the server to the whole network without authentication; only enable it on a network you trust."));
+        _("Read-only is the default: the server only listens on 127.0.0.1, sends no CORS headers, and vbd_write_* tools are hidden from tools/list. Enabling write access lets an AI agent modify the decompiled project (including tools that replace the whole project text) - back up your files first. LAN access exposes the server to the whole network without authentication; only enable it on a network you trust."));
     set_text_utf8(find_ctl(IDC_TXT_SRV_HINT),
         _("Changes to the port / bind address take effect right after clicking OK. Authorization is reset when VB Decompiler restarts, so you will be asked again on the first tool call of the next session."));
 
@@ -860,7 +861,7 @@ static void init_dialog(void)
 static void show_help(void)
 {
     MessageBoxA(g_shell,
-                _AF("VB Decompiler MCP Server Plugin v%s\n\nThis plugin runs as an MCP (Model Context Protocol) server (Streamable HTTP),\nallowing AI clients to read/write VB Decompiler-decompiled code and internal\ndata via the JSON-RPC 2.0 interface.\n\nTools available: 28, split into two groups: vb_read_* (always available)\nand vb_write_* (only when \"Allow MCP client to write project data\" is\nenabled). The first tool call of each session asks for your confirmation.\n\nDebug log (when VBMCP_DEBUG_LOG=1):\n  %%TEMP%%\\vbmcp.log\n", VBMCP_VERSION),
+                _AF("VB Decompiler MCP Server Plugin v%s\n\nThis plugin runs as an MCP (Model Context Protocol) server (Streamable HTTP),\nallowing AI clients to read/write VB Decompiler-decompiled code and internal\ndata via the JSON-RPC 2.0 interface.\n\nTools available: %d, split into two groups: vbd_read_* (always available)\nand vbd_write_* (only when \"Allow MCP client to write project data\" is\nenabled). The first tool call of each session asks for your confirmation.\n\nDebug log (when VBDMCP_DEBUG_LOG=1):\n  %%TEMP%%\\vbdmcp.log\n", VBDMCP_VERSION, mcp_local_tool_count(1)),
                 _A("VB Decompiler MCP Server Help"), MB_OK | MB_ICONINFORMATION);
 }
 
@@ -1025,7 +1026,7 @@ static INT_PTR CALLBACK page_dlg_proc(HWND hPage, UINT msg, WPARAM wp, LPARAM lp
 /* 创建两个页窗口（不显示：显示/隐藏由 apply_tab 决定） */
 static void create_page_windows(HWND hDlg)
 {
-    HINSTANCE hInst = vbmcp_self_module();
+    HINSTANCE hInst = vbdmcp_self_module();
     if (!hInst) hInst = (HINSTANCE)GetModuleHandleA(NULL);
 
     const int ids[2] = { IDD_PAGE_SERVER, IDD_PAGE_ACCESS };
@@ -1042,7 +1043,7 @@ static void create_page_windows(HWND hDlg)
 }
 
 /* ============================================================
- * 对话框过程（窗体本体来自 res/vbmcp.rc 的 IDD_VBMCP_OPTIONS 模板，
+ * 对话框过程（窗体本体来自 res/vbdmcp.rc 的 IDD_VBDMCP_OPTIONS 模板，
  * 两个属性页来自 IDD_PAGE_SERVER / IDD_PAGE_ACCESS 两个页模板）
  *
  * 模板负责"有哪些控件"（样式、Tab 顺序、WS_THICKFRAME 等），本过程负责：
@@ -1093,17 +1094,17 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
         layout_dialog(hDlg);        /* 兜底排一次：模板 DLU 尺寸必须被覆盖 */
 
         /* 诊断：确认宿主加载的是哪个 DLL、DPI、以及窗体/标签统一后的底色。
-         * 打开日志：set VBMCP_DEBUG_LOG=1（默认 %TEMP%\vbmcp.log） */
+         * 打开日志：set VBDMCP_DEBUG_LOG=1（默认 %TEMP%\vbdmcp.log） */
         {
             char selfPath[MAX_PATH] = { 0 };
             char hostPath[MAX_PATH] = { 0 };
-            HMODULE hSelf = vbmcp_self_module();
+            HMODULE hSelf = vbdmcp_self_module();
             if (hSelf) GetModuleFileNameA(hSelf, selfPath, MAX_PATH);
             GetModuleFileNameA(NULL, hostPath, MAX_PATH);   /* 宿主 exe */
 
             RECT cr;
             GetClientRect(hDlg, &cr);
-            vbmcp_logf(VBMCP_LOG_INFO,
+            vbdmcp_logf(VBDMCP_LOG_INFO,
                        "options dialog: dll=%s host=%s dpi=%u client=%dx%d "
                        "uiBg=0x%06X",
                        selfPath, hostPath, (unsigned)g_dpi,
@@ -1124,17 +1125,17 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             char port_txt[16];
             get_item_text(IDC_EDIT_PORT, port_txt, sizeof(port_txt));
             int port = atoi(port_txt);
-            if (port <= 0 || port > 65535) port = VBMCP_DEFAULT_PORT;
+            if (port <= 0 || port > 65535) port = VBDMCP_DEFAULT_PORT;
 
             char bind[64] = {0};
             if (lan_adv) {
                 get_item_text(IDC_TXT_BIND, bind, sizeof(bind));
                 char *b = bind;
                 while (*b == ' ' || *b == '\t') b++;
-                if (!*b) strcpy_s(bind, sizeof(bind), VBMCP_DEFAULT_BIND);
+                if (!*b) strcpy_s(bind, sizeof(bind), VBDMCP_DEFAULT_BIND);
             } else {
                 /* 未显式开启局域网高级选项 → 强制回环，绝不监听 0.0.0.0 */
-                strcpy_s(bind, sizeof(bind), VBMCP_DEFAULT_BIND);
+                strcpy_s(bind, sizeof(bind), VBDMCP_DEFAULT_BIND);
             }
 
             /* 安全硬约束：非回环监听必须弹高危警告并二次确认 */
@@ -1147,10 +1148,10 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             g_enabled.store(enable);
             g_port.store(port);
             g_allow_write.store(allow_write);
-            vbmcp_set_bind_address(bind);
-            vbmcp_config_save(port, bind, allow_write);
+            vbdmcp_set_bind_address(bind);
+            vbdmcp_config_save(port, bind, allow_write);
 
-            if (!vbmcp_server_apply(enable, port)) {
+            if (!vbdmcp_server_apply(enable, port)) {
                 MessageBoxA(hDlg,
                             _AF("MCP Server failed to start on port %d: port may be in use. Try another port.",
                                 port),
@@ -1159,8 +1160,8 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
                 return TRUE;              /* 保持窗体打开，让用户改端口 */
             }
             /* 读写工具集变化 → 广播 tools/list_changed */
-            if (write_changed) vbmcp_notify_tools_list_changed();
-            vbmcp_log(_F("apply settings ok: enable=%d port=%d bind=%s", enable, port, bind));
+            if (write_changed) vbdmcp_notify_tools_list_changed();
+            vbdmcp_log(_F("apply settings ok: enable=%d port=%d bind=%s", enable, port, bind));
             EndDialog(hDlg, IDOK);
             return TRUE;
         }
@@ -1186,9 +1187,9 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             set_check(IDC_CHK_LAN_ADVANCED, 0);
             enable_ctl(IDC_TXT_BIND, FALSE);
             char port_txt[16];
-            _snprintf_s(port_txt, sizeof(port_txt), _TRUNCATE, "%d", VBMCP_DEFAULT_PORT);
+            _snprintf_s(port_txt, sizeof(port_txt), _TRUNCATE, "%d", VBDMCP_DEFAULT_PORT);
             set_text(IDC_EDIT_PORT, port_txt);
-            set_text(IDC_TXT_BIND, VBMCP_DEFAULT_BIND);
+            set_text(IDC_TXT_BIND, VBDMCP_DEFAULT_BIND);
             refresh_mode_label();
             update_access_page();
             return TRUE;
@@ -1225,7 +1226,7 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
                 set_text(IDC_TXT_BIND, "0.0.0.0");
             } else {
                 enable_ctl(IDC_TXT_BIND, FALSE);
-                set_text(IDC_TXT_BIND, VBMCP_DEFAULT_BIND);
+                set_text(IDC_TXT_BIND, VBDMCP_DEFAULT_BIND);
             }
             update_access_page();
             return TRUE;
@@ -1249,7 +1250,7 @@ static INT_PTR CALLBACK dlg_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
                 char buf[16] = {0};
                 get_item_text(IDC_EDIT_PORT, buf, sizeof(buf));
                 int v = atoi(buf);
-                if (v < 1) v = VBMCP_DEFAULT_PORT;   /* 文本为空/非法：从默认端口起算 */
+                if (v < 1) v = VBDMCP_DEFAULT_PORT;   /* 文本为空/非法：从默认端口起算 */
                 /* 符号实测（ui_preview 的合成点击探针）：up 箭头 iDelta = -1、
                  * down 箭头 = +1（位置按"向下增长"约定），故取负后 + 为 +1。 */
                 v -= ud->iDelta;
@@ -1655,7 +1656,7 @@ static void layout_dialog(HWND hDlg)
  * 注意 hInstance 必须是**本 DLL**：插件由 VB Decompiler 加载，
  * 宿主 hInstance 不是我们，DialogBoxParam 会去错模块找模板。
  * ============================================================ */
-void vbmcp_options_dialog(HWND hParent)
+void vbdmcp_options_dialog(HWND hParent)
 {
     if (g_options_hwnd && IsWindow(g_options_hwnd)) {
         SetForegroundWindow(g_options_hwnd);
@@ -1665,12 +1666,12 @@ void vbmcp_options_dialog(HWND hParent)
     /* 每次开窗先重读语言，让界面跟用户最近改的语言一致 */
     I18n_Refresh();
 
-    HINSTANCE hInst = vbmcp_self_module();
+    HINSTANCE hInst = vbdmcp_self_module();
     if (!hInst) hInst = (HINSTANCE)GetModuleHandleA(NULL);
 
     /* DialogBoxParam 自带模态循环：禁用父窗、IsDialogMessage、
      * 结束自动回到这里 —— 不再需要手写消息循环。 */
-    DialogBoxParamA(hInst, MAKEINTRESOURCEA(IDD_VBMCP_OPTIONS), hParent, dlg_proc, 0);
+    DialogBoxParamA(hInst, MAKEINTRESOURCEA(IDD_VBDMCP_OPTIONS), hParent, dlg_proc, 0);
 
     g_options_hwnd = NULL;
     g_shell = NULL;
@@ -1680,7 +1681,7 @@ void vbmcp_options_dialog(HWND hParent)
 }
 
 /* 进程退出时释放字体/背景刷（GDI 对象必须在进程退出前释放） */
-void vbmcp_options_dialog_cleanup(void)
+void vbdmcp_options_dialog_cleanup(void)
 {
     if (g_hUiFont) { DeleteObject(g_hUiFont); g_hUiFont = NULL; }
     /* g_hUiBgBrush 是自建的实色刷，必须删（系统刷不能删） */

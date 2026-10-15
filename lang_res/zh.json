@@ -1,6 +1,6 @@
 {
     "VB Decompiler MCP Server": "VB Decompiler MCP 服务器",
-    "vbmcp project, admin@vb-decompiler.org": "vbmcp 项目, admin@vb-decompiler.org",
+    "vbdmcp project, admin@vb-decompiler.org": "vbdmcp 项目, admin@vb-decompiler.org",
     "VB Decompiler MCP Server Settings": "VB Decompiler MCP 服务器设置",
     "Enable MCP Server": "启用 MCP 服务器",
     "Bind IP address:": "绑定 IP 地址:",
@@ -31,7 +31,7 @@
     "Missing text": "缺少 text",
     "Missing or invalid line": "缺少或非法的 line",
     "Tool name is empty": "工具名为空",
-    "Project not loaded. The VB SDK provides no ReloadFile/Refresh API, so vbmcp cannot re-initialize the engine from the DLL side. Please open the vbmcp settings window from the Plugins menu in the VB Decompiler main window and click OK (this triggers a VBDecompilerPluginLoad re-entry). Tool called: %s": "项目未加载。VB SDK 不提供 ReloadFile/Refresh API，vbmcp 无法从 DLL 侧自动重新初始化 engine。请在 VB Decompiler 主窗口的 Plugins 菜单里打开 vbmcp 配置窗口并点确定（会触发 VBDecompilerPluginLoad 重入）。调用工具: %s",
+    "Project not loaded. The VB SDK provides no ReloadFile/Refresh API, so vbdmcp cannot re-initialize the engine from the DLL side. Please open the vbdmcp settings window from the Plugins menu in the VB Decompiler main window and click OK (this triggers a VBDecompilerPluginLoad re-entry). Tool called: %s": "项目未加载。VB SDK 不提供 ReloadFile/Refresh API，vbdmcp 无法从 DLL 侧自动重新初始化 engine。请在 VB Decompiler 主窗口的 Plugins 菜单里打开 vbdmcp 配置窗口并点确定（会触发 VBDecompilerPluginLoad 重入）。调用工具: %s",
     "Unknown tool: %s": "未知工具: %s",
     "Maximum number of items to return": "最多返回多少条",
     "Start offset": "起始偏移",
@@ -64,7 +64,7 @@
     "Control decompilation options: the \"Parse stack parameters\" and \"Procedure analyzer and optimizer\" checkboxes. Omitting either parameter leaves the corresponding option unchanged.": "控制反编译选项：\"Parse stack parameters\"和\"Procedure analyzer and optimizer\"复选框。任一参数省略 → 不改变对应选项。",
     "List icons/images in the Form's FRX file: {count, icons:[{index,offset,size}]}. Supports pagination.": "列出 Form FRX 文件中的图标/图像：{count, icons:[{index,offset,size}]}。支持分页。",
     "Commit all Set modifications and refresh the GUI (tools normally call this automatically; call manually only after modifying large amounts of data externally).": "提交所有 Set 修改并刷新 GUI（一般工具内部已自动调用，仅在外部修改大量数据后需要时手动调用）。",
-    "Write access is disabled. All vb_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings.": "写入权限未开启。只读模式下所有 vb_write_* 工具均不可用。请在 VB Decompiler MCP 设置中勾选\"允许 MCP 客户端写入项目数据\"。",
+    "Write access is disabled. All vbd_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings.": "写入权限未开启。只读模式下所有 vbd_write_* 工具均不可用。请在 VB Decompiler MCP 设置中勾选\"允许 MCP 客户端写入项目数据\"。",
     "Access denied: the user rejected this MCP session. All subsequent requests from this session will be rejected.": "访问被拒绝：用户已拒绝本次 MCP 会话。该会话的后续所有请求都将被拒绝。",
     "VB Decompiler MCP Server - Access Request": "VB Decompiler MCP 服务器 - 访问请求",
     "An MCP client is trying to access this VB Decompiler project data.\n\nClient: %s\n\nChoose \"Yes\" to allow this session, or \"No\" to deny all requests.\n(Read-only mode is still enforced separately by the write permission switch.)": "有 MCP 客户端正在尝试访问本机 VB Decompiler 项目数据。\n\n客户端：%s\n\n选择\"是\"允许本次会话，选择\"否\"拒绝所有请求。\n（只读 / 写入权限开关仍然独立生效。）",
@@ -79,7 +79,7 @@
     "Permission mode:": "权限模式:",
     "read-only": "只读",
     "read-write": "读写",
-    "Read-only is the default: the server only listens on 127.0.0.1, sends no CORS headers, and vb_write_* tools are hidden from tools/list. Enabling write access lets an AI agent modify the decompiled project (including tools that replace the whole project text) - back up your files first. LAN access exposes the server to the whole network without authentication; only enable it on a network you trust.": "默认只读：服务仅监听 127.0.0.1、不返回任何 CORS 头，vb_write_* 工具不会出现在 tools/list 中。开启写入权限后，AI 代理可以修改反编译工程（含整体覆盖项目文本的工具），请先备份原始文件。开放局域网访问会在无鉴权的情况下把服务暴露给整个网络，请仅在可信网络中启用。",
+    "Read-only is the default: the server only listens on 127.0.0.1, sends no CORS headers, and vbd_write_* tools are hidden from tools/list. Enabling write access lets an AI agent modify the decompiled project (including tools that replace the whole project text) - back up your files first. LAN access exposes the server to the whole network without authentication; only enable it on a network you trust.": "默认只读：服务仅监听 127.0.0.1、不返回任何 CORS 头，vbd_write_* 工具不会出现在 tools/list 中。开启写入权限后，AI 代理可以修改反编译工程（含整体覆盖项目文本的工具），请先备份原始文件。开放局域网访问会在无鉴权的情况下把服务暴露给整个网络，请仅在可信网络中启用。",
     "Changes to the port / bind address take effect right after clicking OK. Authorization is reset when VB Decompiler restarts, so you will be asked again on the first tool call of the next session.": "端口 / 绑定地址的修改在点“确定”后立即生效。VB Decompiler 重启后授权状态会重置，下次会话首次调用工具时会再次向你确认。",
     "Client app:": "客户端软件:",
     "Config path:": "写入路径:",
@@ -90,7 +90,6 @@
     "Permissions and security": "权限与安全",
     "VB Decompiler MCP Server Help": "VB Decompiler MCP 服务器 帮助",
     "Help": "帮助",
-    "VB Decompiler MCP Server Plugin v%s\n\nThis plugin runs as an MCP (Model Context Protocol) server (Streamable HTTP),\nallowing AI clients to read/write VB Decompiler-decompiled code and internal\ndata via the JSON-RPC 2.0 interface.\n\nTools available: 28, split into two groups: vb_read_* (always available)\nand vb_write_* (only when \"Allow MCP client to write project data\" is\nenabled). The first tool call of each session asks for your confirmation.\n\nDebug log (when VBMCP_DEBUG_LOG=1):\n  %%TEMP%%\\vbmcp.log\n": "VB Decompiler MCP 服务器插件 v%s\n\n本插件以 MCP（Model Context Protocol）服务器方式运行（Streamable HTTP），\nAI 客户端可通过 JSON-RPC 2.0 接口读取/写入 VB Decompiler 反编译出的代码与内部数据。\n\n可用工具共 28 个，分两组：vb_read_*（始终可用）；\nvb_write_*（仅在勾选「允许 MCP 客户端写入项目数据」后可用）。\n每个会话的首次工具调用都会先请求你的确认。\n\n调试日志（需设置 VBMCP_DEBUG_LOG=1）：\n  %%TEMP%%\\vbmcp.log\n",
     "Another request from this connection is still in flight; wait for its response before sending the next one.": "本连接上还有一个请求尚未完成，请等待其响应后再发送下一个请求。",
     "Server busy: %d MCP tasks are already queued on the VB Decompiler UI thread (limit %d). The request was rejected to keep the UI responsive; retry in a moment.": "服务器繁忙：VB Decompiler 界面线程上已排队的 MCP 任务达到 %d 个（上限 %d），为保证界面响应已拒绝本次请求，请稍后重试。",
     "Task timed out: the request waited longer than %d seconds for the VB Decompiler UI thread. The operation was cancelled; try again with a smaller scope (for example a single module or function).": "任务超时：请求等待 VB Decompiler 界面线程超过 %d 秒，操作已取消。请缩小范围后重试（例如只读取单个模块或函数）。",
@@ -99,5 +98,9 @@
     "form_index %d is out of range (the project has %lld forms)": "form_index %d 超出范围（当前项目共有 %lld 个窗体）",
     "module_index %d is out of range (the project has %lld modules)": "module_index %d 超出范围（当前项目共有 %lld 个模块）",
     "function_index %d is out of range (module %d has %lld functions)": "function_index %d 超出范围（模块 %d 共有 %lld 个函数）",
-    "Get the text of the project file (.vbp manifest: project type, references, components, startup object). This is the project descriptor, NOT the concatenated decompiled source of every form/module - to read code, list the forms/modules (vb_read_list_forms / vb_read_list_modules) and read them one by one.": "获取工程文件（.vbp 清单：工程类型、引用、组件、启动对象）的文本。这是工程描述文件，而不是所有窗体/模块的反编译源码合集——要读代码请先列出窗体/模块（vb_read_list_forms / vb_read_list_modules）再逐个读取。"
+    "Get the text of the project file (.vbp manifest: project type, references, components, startup object). This is the project descriptor, NOT the concatenated decompiled source of every form/module - to read code, list the forms/modules (vbd_read_list_forms / vbd_read_list_modules) and read them one by one.": "获取工程文件（.vbp 清单：工程类型、引用、组件、启动对象）的文本。这是工程描述文件，而不是所有窗体/模块的反编译源码合集——要读代码请先列出窗体/模块（vbd_read_list_forms / vbd_read_list_modules）再逐个读取。",
+    "Missing or invalid query": "缺少或非法的 query 参数",
+    "Find functions by name substring (case-insensitive) or by address, accepting the display form shown by VB Decompiler (e.g. \"Proc_4_51_89CB90\", \"Command5\", \"0x89CB90\", \"9030544\"). Returns {count, total_count, matches:[{module_index, module_name, function_index, name, address, address_hex}]}; feed module_index + function_index to vbd_read_function.": "按函数名子串（忽略大小写）或地址查找函数，支持 VB Decompiler 界面上的显示形式（如 \"Proc_4_51_89CB90\"、\"Command5\"、\"0x89CB90\"、\"9030544\"）。返回 {count, total_count, matches:[{module_index, module_name, function_index, name, address, address_hex}]}；把 module_index + function_index 交给 vbd_read_function 即可取代码。",
+    "Function name substring (case-insensitive) or an address (decimal or 0x-hex). Accepts the display form shown by VB Decompiler, e.g. \"Proc_4_51_89CB90\".": "函数名子串（忽略大小写）或地址（十进制或 0x 十六进制）。支持 VB Decompiler 界面上的显示形式，如 \"Proc_4_51_89CB90\"。",
+    "VB Decompiler MCP Server Plugin v%s\n\nThis plugin runs as an MCP (Model Context Protocol) server (Streamable HTTP),\nallowing AI clients to read/write VB Decompiler-decompiled code and internal\ndata via the JSON-RPC 2.0 interface.\n\nTools available: %d, split into two groups: vbd_read_* (always available)\nand vbd_write_* (only when \"Allow MCP client to write project data\" is\nenabled). The first tool call of each session asks for your confirmation.\n\nDebug log (when VBDMCP_DEBUG_LOG=1):\n  %%TEMP%%\\vbdmcp.log\n": "VB Decompiler MCP Server 插件 v%s\n\n本插件以 MCP（Model Context Protocol）服务器（Streamable HTTP）方式运行，\n允许 AI 客户端通过 JSON-RPC 2.0 接口读写 VB Decompiler 反编译出的代码与内部数据。\n\n可用工具：%d 个，分为两组：vbd_read_*（始终可用）与 vbd_write_*（仅在\n勾选“允许 MCP 客户端写入工程数据”后可用）。每个会话的首次工具调用会请求你确认。\n\n调试日志（VBDMCP_DEBUG_LOG=1 时）：\n  %%TEMP%%\\vbdmcp.log\n"
 }

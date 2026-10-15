@@ -3,9 +3,9 @@
  *
  * 设计原则：
  *  - 工具名严格分为两组：
- *      vb_read_*   只读操作（读取项目结构 / 源码 / 反编译信息 / 元数据）
- *      vb_write_*  修改操作（保存、修改工程、覆盖导出、删除/清空项目资源）
- *    只读模式下 listTools 只返回 vb_read_*；开启"允许写入"后才追加 vb_write_*。
+ *      vbd_read_*   只读操作（读取项目结构 / 源码 / 反编译信息 / 元数据）
+ *      vbd_write_*  修改操作（保存、修改工程、覆盖导出、删除/清空项目资源）
+ *    只读模式下 listTools 只返回 vbd_read_*；开启"允许写入"后才追加 vbd_write_*。
  *  - 输入为 JSON 对象（arguments），输出为 JSON：**全部使用 yyjson** 构建/解析，
  *    删除全部手写 JSON 序列化代码。
  *  - 数据编码（见下方"数据编码"小节）：工具默认把引擎的 ANSI/GBK 字节转成
@@ -14,11 +14,11 @@
  *  - 业务错误返回 {"error":"..."}（isError:true 的工具结果，占用 MCP 内容通道，
  *    不占用 JSON-RPC 错误通道）；权限/参数类错误经 out_err 由 dispatcher 分类。
  *  - 错误分类不再走全局变量：每个 impl 通过 `int *out_err` 显式回填
- *    VBMCP_ERR_*，由 mcp_dispatch_tool 上报给 rpc 层。
+ *    VBDMCP_ERR_*，由 mcp_dispatch_tool 上报给 rpc 层。
  *  - 所有工具实现都假定在主线程调用（避开 Callback Engine 线程安全问题）。
  */
 #include "mcp_tools.h"
-#include "vbmcp.h"
+#include "vbdmcp.h"
 #include "i18n.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -37,7 +37,7 @@ static char *doc_to_string(yyjson_mut_doc *doc)
         s = yyjson_mut_write(doc, YYJSON_WRITE_ALLOW_INVALID_UNICODE, NULL);
         yyjson_mut_doc_free(doc);
     }
-    if (!s) s = vbmcp_strdup("{}");
+    if (!s) s = vbdmcp_strdup("{}");
     return s;
 }
 
@@ -60,7 +60,7 @@ static char *err_json(int *out_err, int code, const char *msg)
     if (out_err) *out_err = code;
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return vbmcp_strdup("{\"error\":\"out of memory\"}");
+    if (!doc) return vbdmcp_strdup("{\"error\":\"out of memory\"}");
     yyjson_mut_obj_add_strcpy(doc, root, "error", msg ? msg : "");
     return doc_to_string(doc);
 }
@@ -76,20 +76,20 @@ static char *err_json(int *out_err, int code, const char *msg)
  * ============================================================ */
 enum { ENC_UTF8 = 0, ENC_GBK = 1 };
 
-/* 引擎文本（ANSI/GBK）→ 结果文本：返回 new alloc（vbmcp_free）。 */
+/* 引擎文本（ANSI/GBK）→ 结果文本：返回 new alloc（vbdmcp_free）。 */
 static char *enc_out(const char *engine_text, int enc)
 {
     if (!engine_text) return NULL;
-    return (enc == ENC_GBK) ? vbmcp_strdup(engine_text)
-                            : vbmcp_acp_to_utf8(engine_text);
+    return (enc == ENC_GBK) ? vbdmcp_strdup(engine_text)
+                            : vbdmcp_acp_to_utf8(engine_text);
 }
 
-/* 客户端文本（UTF-8 JSON）→ 引擎文本（ANSI/GBK）：返回 new alloc（vbmcp_free）。 */
+/* 客户端文本（UTF-8 JSON）→ 引擎文本（ANSI/GBK）：返回 new alloc（vbdmcp_free）。 */
 static char *enc_in(const char *json_text, int enc)
 {
     if (!json_text) return NULL;
-    return (enc == ENC_GBK) ? vbmcp_strdup(json_text)
-                            : vbmcp_str_to_gbk(json_text);
+    return (enc == ENC_GBK) ? vbdmcp_strdup(json_text)
+                            : vbdmcp_str_to_gbk(json_text);
 }
 
 /* 把引擎文本按编码转换后写入对象的字符串字段。 */
@@ -98,7 +98,7 @@ static void add_text(yyjson_mut_doc *doc, yyjson_mut_val *obj,
 {
     char *t = enc_out(engine_text, enc);
     yyjson_mut_obj_add_strcpy(doc, obj, key, t ? t : "");
-    if (t) vbmcp_free(t);
+    if (t) vbdmcp_free(t);
 }
 
 /* 数组版本（表单名 / 模块名列表等）。 */
@@ -107,7 +107,7 @@ static void arr_add_text(yyjson_mut_doc *doc, yyjson_mut_val *arr,
 {
     char *t = enc_out(engine_text, enc);
     yyjson_mut_arr_add_strcpy(doc, arr, t ? t : "");
-    if (t) vbmcp_free(t);
+    if (t) vbdmcp_free(t);
 }
 
 /* 含自由文本的结果：声明实际使用的编码（utf-8 / gbk），便于客户端判断。 */
@@ -116,12 +116,12 @@ static void add_encoding_field(yyjson_mut_doc *doc, yyjson_mut_val *root, int en
     yyjson_mut_obj_add_strcpy(doc, root, "encoding", enc == ENC_GBK ? "gbk" : "utf-8");
 }
 
-/* 写工具：把客户端文本转成引擎字节并调用 vb_set_value（Set 语义见 vbdec_sdk.cpp）。 */
+/* 写工具：把客户端文本转成引擎字节并调用 vbd_set_value（Set 语义见 vbdec_sdk.cpp）。 */
 static void set_text_value(int vlType, const char *json_text, int enc, int idx, int fn)
 {
     char *ansi = enc_in(json_text, enc);
-    vb_set_value(vlType, ansi ? ansi : (json_text ? json_text : ""), idx, fn);
-    if (ansi) vbmcp_free(ansi);
+    vbd_set_value(vlType, ansi ? ansi : (json_text ? json_text : ""), idx, fn);
+    if (ansi) vbdmcp_free(ansi);
 }
 
 /* ============================================================
@@ -164,9 +164,9 @@ static int arg_encoding(yyjson_val *args)
  * 返回 1=是 native 项目（应拒绝），0=非 native（允许）。 */
 static int is_native_project(void)
 {
-    char *s = vb_get_value(VB_IsNativeCompilation, 0, 0);
+    char *s = vbd_get_value(VBD_IsNativeCompilation, 0, 0);
     int nat = (s && s[0] == '1') ? 1 : 0;
-    if (s) vbmcp_free(s);
+    if (s) vbdmcp_free(s);
     return nat;
 }
 
@@ -201,23 +201,47 @@ static int arg_index(yyjson_val *args, const char *name, int def)
 /* 窗体总数（引擎直接提供，调用很便宜） */
 static long long form_total(void)
 {
-    char *s = vb_get_value(VB_GetVBFormCount, 0, 0);
+    char *s = vbd_get_value(VBD_GetVBFormCount, 0, 0);
     const long long n = safe_parse_int(s, 0);
-    if (s) vbmcp_free(s);
+    if (s) vbdmcp_free(s);
     return n;
 }
 
 /* 指定模块的函数数 */
 static long long module_function_total(int midx)
 {
-    char *s = vb_get_value(VB_GetModuleFunctionCount, midx, 0);
+    char *s = vbd_get_value(VBD_GetModuleFunctionCount, midx, 0);
     const long long n = safe_parse_int(s, 0);
-    if (s) vbmcp_free(s);
+    if (s) vbdmcp_free(s);
     return n;
 }
 
 /* 模块总数：复用模块名探测缓存（定义见下方 get_module_names） */
 static long long module_total(void);
+
+/* 按指定进制解析无符号整数（base=16 时允许 0x 前缀）。非法字符/超 32 位返回 -1。
+ * 用于 vbd_find_function 的地址匹配："89FB20"（十六进制）与 "9042720"（十进制）
+ * 在字面上无法区分，调用方按两种进制各解析一次、任一命中即可。 */
+static long long parse_uint_base(const char *s, int base)
+{
+    if (!s || !*s) return -1;
+    if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    long long v = 0;
+    int digits = 0;
+    for (; *s; s++) {
+        const unsigned char ch = (unsigned char)*s;
+        int d;
+        if (ch >= '0' && ch <= '9')                        d = ch - '0';
+        else if (base == 16 && ch >= 'a' && ch <= 'f')     d = ch - 'a' + 10;
+        else if (base == 16 && ch >= 'A' && ch <= 'F')     d = ch - 'A' + 10;
+        else return -1;
+        if (d >= base) return -1;
+        v = v * base + d;
+        if (v > 0xFFFFFFFFLL) return -1;
+        digits++;
+    }
+    return digits > 0 ? v : -1;
+}
 
 /* 分页元数据 + 把 items 数组挂到 root。
  * 遵守 MCP Best Practices 分页约定：
@@ -258,7 +282,7 @@ static char *one_text_result(const char *key, const char *engine_text,
 {
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return vbmcp_strdup("{}");
+    if (!doc) return vbdmcp_strdup("{}");
     add_text(doc, root, key, engine_text, enc);
     if (with_encoding) add_encoding_field(doc, root, enc);
     return doc_to_string(doc);
@@ -268,106 +292,106 @@ static char *one_text_result(const char *key, const char *engine_text,
  * 只读工具实现
  * ============================================================ */
 
-/* -------- vb_read_project_info -------- */
+/* -------- vbd_read_project_info -------- */
 static char *tool_read_project_info(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
 
-    char *file_name = vb_get_value(VB_GetFileName, 0, 0);
-    char *dec_path  = vb_get_value(VB_GetVBDecompilerPath, 0, 0);
-    char *native    = vb_get_value(VB_IsNativeCompilation, 0, 0);
-    char *compiler  = vb_get_value(VB_GetCompiler, 0, 0);
-    char *packed    = vb_get_value(VB_IsPacked, 0, 0);
+    char *file_name = vbd_get_value(VBD_GetFileName, 0, 0);
+    char *dec_path  = vbd_get_value(VBD_GetVBDecompilerPath, 0, 0);
+    char *native    = vbd_get_value(VBD_IsNativeCompilation, 0, 0);
+    char *compiler  = vbd_get_value(VBD_GetCompiler, 0, 0);
+    char *packed    = vbd_get_value(VBD_IsPacked, 0, 0);
 
     add_text(doc, root, "file_name", file_name ? file_name : "", enc);
-    add_text(doc, root, "vbmcp_path", dec_path ? dec_path : "", enc);
+    add_text(doc, root, "vbdmcp_path", dec_path ? dec_path : "", enc);
     add_text(doc, root, "is_native", native ? native : "", enc);
     add_text(doc, root, "compiler", compiler ? compiler : "", enc);
     add_text(doc, root, "is_packed", packed ? packed : "", enc);
 
-    vbmcp_free(file_name);
-    vbmcp_free(dec_path);
-    vbmcp_free(native);
-    vbmcp_free(compiler);
-    vbmcp_free(packed);
+    vbdmcp_free(file_name);
+    vbdmcp_free(dec_path);
+    vbdmcp_free(native);
+    vbdmcp_free(compiler);
+    vbdmcp_free(packed);
     return doc_to_string(doc);
 }
 
-/* -------- vb_read_project_text -------- */
+/* -------- vbd_read_project_text -------- */
 static char *tool_read_project_text(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    char *text = vb_get_value(VB_GetVBProject, 0, 0);
-    if (!text) return err_json(out_err, VBMCP_ERR_BUSINESS, _("No project is currently open"));
+    char *text = vbd_get_value(VBD_GetVBProject, 0, 0);
+    if (!text) return err_json(out_err, VBDMCP_ERR_BUSINESS, _("No project is currently open"));
     char *r = one_text_result("project_text", text, enc, 1);
-    vbmcp_free(text);
+    vbdmcp_free(text);
     return r;
 }
 
-/* -------- vb_read_list_forms -------- */
+/* -------- vbd_read_list_forms -------- */
 static char *tool_read_list_forms(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     long long limit, offset;
     read_paging(args, &limit, &offset);
 
-    char *count_str = vb_get_value(VB_GetVBFormCount, 0, 0);
+    char *count_str = vbd_get_value(VBD_GetVBFormCount, 0, 0);
     long long total = safe_parse_int(count_str, 0);
-    if (count_str) vbmcp_free(count_str);
+    if (count_str) vbdmcp_free(count_str);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
-        char *name = vb_get_value(VB_GetVBFormName, (int)i, 0);
+        char *name = vbd_get_value(VBD_GetVBFormName, (int)i, 0);
         arr_add_text(doc, arr, name ? name : "", enc);
-        if (name) vbmcp_free(name);
+        if (name) vbdmcp_free(name);
     }
     apply_pagination(doc, root, "forms", arr, total, offset, limit);
     return doc_to_string(doc);
 }
 
-/* -------- vb_read_form -------- */
+/* -------- vbd_read_form -------- */
 static char *tool_read_form(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "form_index", -1);
-    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (idx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
     if ((long long)idx >= form_total()) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("form_index %d is out of range (the project has %lld forms)", idx, form_total()));
     }
 
-    char *content = vb_get_value(VB_GetVBForm, (int)idx, 0);
-    if (!content) return err_json(out_err, VBMCP_ERR_BUSINESS, _("Cannot read form content"));
+    char *content = vbd_get_value(VBD_GetVBForm, (int)idx, 0);
+    if (!content) return err_json(out_err, VBDMCP_ERR_BUSINESS, _("Cannot read form content"));
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) { vbmcp_free(content); return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory")); }
+    if (!doc) { vbdmcp_free(content); return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory")); }
 
-    char *name = vb_get_value(VB_GetVBFormName, (int)idx, 0);
+    char *name = vbd_get_value(VBD_GetVBFormName, (int)idx, 0);
     yyjson_mut_obj_add_int(doc, root, "form_index", idx);
     add_text(doc, root, "form_name", name ? name : "", enc);
     add_text(doc, root, "form_text", content, enc);
     add_encoding_field(doc, root, enc);
-    vbmcp_free(name);
-    vbmcp_free(content);
+    vbdmcp_free(name);
+    vbdmcp_free(content);
     return doc_to_string(doc);
 }
 
-/* -------- vb_read_list_modules --------
+/* -------- vbd_read_list_modules --------
  * SDK 26 中 value=36 语义冲突（.h=SetModuleCount / .inc=GetModuleCount），
  * demo 全不使用。改用 GetModuleName(0..N) 探测到 NULL/空串确定总数。
  * 探测结果加进程内缓存（见 get_module_names），避免每次 list 都全量调用引擎。 */
-#define VBMCP_MAX_MODULES 10000
+#define VBDMCP_MAX_MODULES 10000
 
 struct ModuleNameCache {
     std::string              key;      /* 缓存键：项目文件名 + 写入世代 */
@@ -384,7 +408,7 @@ static unsigned g_write_generation = 0;
  * 用于过滤 GetModuleName 遍历到列表末尾时返回的 GUI 装饰项 ——
  * 实测在列表尾部会返回 "End of forms :)"（含空格/冒号/括号），
  * 若不过滤会被当成一个模块（28 → 实际 27）。 */
-static int is_vb_identifier(const char *s)
+static int is_vbd_identifier(const char *s)
 {
     if (!s || !*s) return 0;
     if (!(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
@@ -397,24 +421,24 @@ static int is_vb_identifier(const char *s)
 /* 探测并缓存模块名列表。返回的指针在下次失效前有效。 */
 static const std::vector<std::string> *get_module_names(void)
 {
-    char *fn = vb_get_value(VB_GetFileName, 0, 0);
+    char *fn = vbd_get_value(VBD_GetFileName, 0, 0);
     std::string key = fn ? fn : "";
-    if (fn) vbmcp_free(fn);
+    if (fn) vbdmcp_free(fn);
     key += '#';
     key += std::to_string(g_write_generation);
 
     if (!g_module_cache.valid || g_module_cache.key != key) {
         g_module_cache.names.clear();
-        for (int i = 0; i < VBMCP_MAX_MODULES; i++) {
-            char *name = vb_get_value(VB_GetModuleName, i, 0);
-            if (!name || !*name) { if (name) vbmcp_free(name); break; }
+        for (int i = 0; i < VBDMCP_MAX_MODULES; i++) {
+            char *name = vbd_get_value(VBD_GetModuleName, i, 0);
+            if (!name || !*name) { if (name) vbdmcp_free(name); break; }
             /* 列表末尾是 GUI 装饰项（如 "End of forms :)"）：它标志列表结束，
              * 遇到即停止探测。这样既过滤掉装饰项，又**不再继续访问真正越界的
              * 索引** —— 引擎对越界索引的访问可能有宿主副作用（实测
              * GetVBForm(999999) 会让当前视图切到空位置）。 */
-            if (!is_vb_identifier(name)) { vbmcp_free(name); break; }
+            if (!is_vbd_identifier(name)) { vbdmcp_free(name); break; }
             g_module_cache.names.emplace_back(name);
-            vbmcp_free(name);
+            vbdmcp_free(name);
         }
         g_module_cache.key = key;
         g_module_cache.valid = true;
@@ -439,7 +463,7 @@ static char *tool_read_list_modules(yyjson_val *args, int *out_err)
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
@@ -451,27 +475,27 @@ static char *tool_read_list_modules(yyjson_val *args, int *out_err)
     return doc_to_string(doc);
 }
 
-/* -------- vb_read_module -------- */
+/* -------- vbd_read_module -------- */
 static char *tool_read_module(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
-    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (idx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
     if ((long long)idx >= module_total()) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
     }
 
-    char *content = vb_get_value(VB_GetModule, (int)idx, 0);
-    char *name    = vb_get_value(VB_GetModuleName, (int)idx, 0);
-    char *str_ref = vb_get_value(VB_GetModuleStringReferences, (int)idx, 0);
+    char *content = vbd_get_value(VBD_GetModule, (int)idx, 0);
+    char *name    = vbd_get_value(VBD_GetModuleName, (int)idx, 0);
+    char *str_ref = vbd_get_value(VBD_GetModuleStringReferences, (int)idx, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
     if (!doc) {
-        vbmcp_free(content); vbmcp_free(name); vbmcp_free(str_ref);
-        return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+        vbdmcp_free(content); vbdmcp_free(name); vbdmcp_free(str_ref);
+        return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     }
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
     add_text(doc, root, "module_name", name ? name : "", enc);
@@ -479,83 +503,104 @@ static char *tool_read_module(yyjson_val *args, int *out_err)
     add_text(doc, root, "string_references", str_ref ? str_ref : "", enc);
     add_encoding_field(doc, root, enc);
 
-    vbmcp_free(content);
-    vbmcp_free(name);
-    vbmcp_free(str_ref);
+    vbdmcp_free(content);
+    vbdmcp_free(name);
+    vbdmcp_free(str_ref);
     return doc_to_string(doc);
 }
 
-/* -------- vb_read_list_module_functions -------- */
+/* -------- vbd_read_list_module_functions -------- */
 static char *tool_read_list_module_functions(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
-    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (idx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
     if ((long long)idx >= module_total()) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
     }
 
     long long limit, offset;
     read_paging(args, &limit, &offset);
 
-    char *count_str = vb_get_value(VB_GetModuleFunctionCount, (int)idx, 0);
+    char *count_str = vbd_get_value(VBD_GetModuleFunctionCount, (int)idx, 0);
     long long total = safe_parse_int(count_str, 0);
-    if (count_str) vbmcp_free(count_str);
+    if (count_str) vbdmcp_free(count_str);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
-        char *name = vb_get_value(VB_GetModuleFunctionName, (int)idx, (int)i);
-        char *addr = vb_get_value(VB_GetModuleFunctionAddress, (int)idx, (int)i);
+        char *name = vbd_get_value(VBD_GetModuleFunctionName, (int)idx, (int)i);
+        char *addr = vbd_get_value(VBD_GetModuleFunctionAddress, (int)idx, (int)i);
         yyjson_mut_val *item = yyjson_mut_arr_add_obj(doc, arr);
         if (item) {
             add_text(doc, item, "name", name ? name : "", enc);
             add_text(doc, item, "address", addr ? addr : "", enc);
             yyjson_mut_obj_add_int(doc, item, "index", i);
         }
-        if (name) vbmcp_free(name);
-        if (addr) vbmcp_free(addr);
+        if (name) vbdmcp_free(name);
+        if (addr) vbdmcp_free(addr);
     }
     apply_pagination(doc, root, "functions", arr, total, offset, limit);
     return doc_to_string(doc);
 }
 
-/* -------- vb_read_function -------- */
+/* 读取一个函数的全部视图（name / address / code / code_fast / str_ref / disasm）。
+ * 抽成函数是为了让"恢复宿主定位"能按**完全相同**的调用序列再执行一遍：
+ * 宿主定位的切换是由这组视图调用里的某一个触发的，只读单个视图不足以切回
+ * （实测：恢复时只读 code 视图无效 —— 读完后宿主 active_coords 仍停在目标函数）。
+ * 因此恢复必须复用同一序列，且顺序保持一致。 */
+static void read_all_function_views(int midx, int fidx,
+                                    char **name, char **addr, char **code,
+                                    char **code_fast, char **str_ref, char **disasm)
+{
+    *name      = vbd_get_value(VBD_GetModuleFunctionName, midx, fidx);
+    *addr      = vbd_get_value(VBD_GetModuleFunctionAddress, midx, fidx);
+    *code      = vbd_get_value(VBD_GetModuleFunction, midx, fidx);
+    *code_fast = vbd_get_value(VBD_GetModuleFunctionCode, midx, fidx);
+    *str_ref   = vbd_get_value(VBD_GetModuleFunctionStrRef, midx, fidx);
+    *disasm    = vbd_get_value(VBD_GetModuleFunctionDisasm, midx, fidx);
+}
+
+/* -------- vbd_read_function -------- */
 static char *tool_read_function(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int midx = arg_index(args, "module_index", -1);
     int fidx = arg_index(args, "function_index", -1);
-    if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (midx < 0 || fidx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
     if ((long long)midx >= module_total() ||
         (long long)fidx >= module_function_total(midx)) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
                module_function_total(midx)));
     }
 
-    char *name      = vb_get_value(VB_GetModuleFunctionName, (int)midx, (int)fidx);
-    char *addr      = vb_get_value(VB_GetModuleFunctionAddress, (int)midx, (int)fidx);
-    char *code      = vb_get_value(VB_GetModuleFunction, (int)midx, (int)fidx);
-    char *code_fast = vb_get_value(VB_GetModuleFunctionCode, (int)midx, (int)fidx);
-    char *str_ref   = vb_get_value(VB_GetModuleFunctionStrRef, (int)midx, (int)fidx);
-    char *disasm    = vb_get_value(VB_GetModuleFunctionDisasm, (int)midx, (int)fidx);
+    /* 记录读取前的宿主"当前定位"。引擎为生成 code / code_fast / disassembly
+     * 等视图，会在内部把宿主的当前定位切到被读取的函数；若不恢复，用户的
+     * 界面会被切走 —— native 项目下目标位置的内容不会随之重新加载，表现就是
+     * "左侧面板被清空"（实测：读 {26,7} 后 coords 由 2,8 变为 26,7 且文本为空）。
+     * 恢复办法：读完再读一次原位置的函数视图，读取本身会把定位切回去。 */
+    char *prev_coords = vbd_get_value(VBD_GetActiveModuleCoordinats, 0, 0);
+
+    char *name = NULL, *addr = NULL, *code = NULL;
+    char *code_fast = NULL, *str_ref = NULL, *disasm = NULL;
+    read_all_function_views(midx, fidx, &name, &addr, &code, &code_fast, &str_ref, &disasm);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
     if (!doc) {
-        vbmcp_free(name); vbmcp_free(addr); vbmcp_free(code);
-        vbmcp_free(code_fast); vbmcp_free(str_ref); vbmcp_free(disasm);
-        return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+        vbdmcp_free(name); vbdmcp_free(addr); vbdmcp_free(code);
+        vbdmcp_free(code_fast); vbdmcp_free(str_ref); vbdmcp_free(disasm);
+        return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     }
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
     yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
@@ -567,88 +612,209 @@ static char *tool_read_function(yyjson_val *args, int *out_err)
     add_text(doc, root, "disassembly", disasm ? disasm : "", enc);
     add_encoding_field(doc, root, enc);
 
-    vbmcp_free(name);
-    vbmcp_free(addr);
-    vbmcp_free(code);
-    vbmcp_free(code_fast);
-    vbmcp_free(str_ref);
-    vbmcp_free(disasm);
+    vbdmcp_free(name);
+    vbdmcp_free(addr);
+    vbdmcp_free(code);
+    vbdmcp_free(code_fast);
+    vbdmcp_free(str_ref);
+    vbdmcp_free(disasm);
+
+    /* 把宿主定位恢复到读取之前的位置：按**同样的视图序列**读一遍原位置，
+     * 确保触发与上面相同的内部定位逻辑（原位置即目标位置时无需动作）。 */
+    if (prev_coords && prev_coords[0]) {
+        int pm = -1, pf = -1;
+        if (sscanf(prev_coords, "%d , %d", &pm, &pf) == 2 && pm >= 0 && pf >= 0 &&
+            !(pm == midx && pf == fidx)) {
+            char *rn = NULL, *ra = NULL, *rc = NULL;
+            char *rcf = NULL, *rsr = NULL, *rd = NULL;
+            read_all_function_views(pm, pf, &rn, &ra, &rc, &rcf, &rsr, &rd);
+            vbdmcp_free(rn);  vbdmcp_free(ra); vbdmcp_free(rc);
+            vbdmcp_free(rcf); vbdmcp_free(rsr); vbdmcp_free(rd);
+            vbdmcp_logf(VBDMCP_LOG_DEBUG,
+                        "read_function: host position restored to %s (target was %d,%d)",
+                        prev_coords, midx, fidx);
+        }
+    }
+    vbdmcp_free(prev_coords);
+
     return doc_to_string(doc);
 }
 
-/* -------- vb_read_sub_main -------- */
+/* -------- vbd_find_function --------
+ * 按"名字片段"或"地址"查找函数，覆盖 VB Decompiler 界面上的各种显示形式：
+ *   - "Proc_4_51_89CB90"（名字_地址后缀）→ 剥掉后缀后与 name 匹配；
+ *   - "Command5"（名字子串，忽略大小写）；
+ *   - "0x89CB90" / "89CB90" / "9030544"（地址：十六进制与十进制各试一次 ——
+ *     两者在字面上无法区分，"89FB20" 是十六进制、"9042720" 是十进制）。
+ * 可选 module_index 限定单模块；limit/offset 分页（默认 50，上限 1000）。
+ * 结果里的 module_index + function_index 可直接传给 vbd_read_function。 */
+static char *tool_find_function(yyjson_val *args, int *out_err)
+{
+    const int enc = arg_encoding(args);
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    const char *query = arg_str(args, "query");
+    if (!query || !*query) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid query"));
+
+    long long limit = arg_int(args, "limit", 50);
+    long long offset = arg_int(args, "offset", 0);
+    if (limit < 1) limit = 1;
+    if (limit > 1000) limit = 1000;
+    if (offset < 0) offset = 0;
+    const int only_module = (int)arg_int(args, "module_index", -1);
+
+    /* 名字查询串：剥掉结尾的 "_<hex>"（VBD 显示名带地址后缀，引擎的 name 不带） */
+    std::string q(query);
+    std::string name_q = q;
+    {
+        const size_t us = q.find_last_of('_');
+        if (us != std::string::npos && us + 1 < q.size()) {
+            const std::string suf = q.substr(us + 1);
+            bool hexish = (suf.size() >= 4 && suf.size() <= 16);
+            for (size_t i = 0; hexish && i < suf.size(); i++) {
+                if (!isxdigit((unsigned char)suf[i])) hexish = false;
+            }
+            if (hexish) name_q = q.substr(0, us);
+        }
+    }
+    std::string q_lower, name_q_lower;
+    for (size_t i = 0; i < q.size(); i++)      q_lower      += (char)tolower((unsigned char)q[i]);
+    for (size_t i = 0; i < name_q.size(); i++) name_q_lower += (char)tolower((unsigned char)name_q[i]);
+
+    const long long q_hex = parse_uint_base(query, 16);
+    const long long q_dec = parse_uint_base(query, 10);
+
+    yyjson_mut_val *root = NULL;
+    yyjson_mut_doc *doc = new_obj_doc(&root);
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+
+    /* 扫描上限：超大项目（函数上万）时仍保证秒级返回 */
+    const long long kMaxScan = 20000;
+    long long scanned = 0, total = 0, emitted = 0;
+    bool truncated = false;
+
+    const std::vector<std::string> *mods = get_module_names();
+    for (int mi = 0; mi < (int)mods->size() && !truncated; mi++) {
+        if (only_module >= 0 && mi != only_module) continue;
+        const long long fn_total = module_function_total(mi);
+        for (long long fi = 0; fi < fn_total; fi++) {
+            if (++scanned > kMaxScan) { truncated = true; break; }
+
+            char *nm = vbd_get_value(VBD_GetModuleFunctionName, mi, (int)fi);
+            char *ad = vbd_get_value(VBD_GetModuleFunctionAddress, mi, (int)fi);
+            const char *name = nm ? nm : "";
+            const long long addr = parse_uint_base(ad ? ad : "", 10);   /* 引擎返回十进制 */
+
+            bool hit = false;
+            if (addr >= 0 && (addr == q_hex || addr == q_dec)) hit = true;
+            if (!hit) {
+                std::string nlower;
+                for (const char *p = name; *p; p++) nlower += (char)tolower((unsigned char)*p);
+                if (nlower.find(q_lower) != std::string::npos) hit = true;
+                else if (!name_q_lower.empty() && nlower.find(name_q_lower) != std::string::npos) hit = true;
+            }
+
+            if (hit) {
+                total++;
+                if (total > offset && emitted < limit) {
+                    yyjson_mut_val *o = yyjson_mut_obj(doc);
+                    yyjson_mut_obj_add_int(doc, o, "module_index", mi);
+                    add_text(doc, o, "module_name", (*mods)[mi].c_str(), enc);
+                    yyjson_mut_obj_add_int(doc, o, "function_index", fi);
+                    add_text(doc, o, "name", name, enc);
+                    yyjson_mut_obj_add_int(doc, o, "address", addr >= 0 ? addr : 0);
+                    if (addr >= 0) {
+                        char hex[32];
+                        _snprintf_s(hex, sizeof(hex), _TRUNCATE, "0x%llX", (unsigned long long)addr);
+                        yyjson_mut_obj_add_strcpy(doc, o, "address_hex", hex);
+                    }
+                    yyjson_mut_arr_add_val(arr, o);
+                    emitted++;
+                }
+            }
+            if (nm) vbdmcp_free(nm);
+            if (ad) vbdmcp_free(ad);
+        }
+    }
+
+    apply_pagination(doc, root, "matches", arr, total, offset, limit);
+    if (truncated) yyjson_mut_obj_add_bool(doc, root, "truncated", 1);
+    return doc_to_string(doc);
+}
+
+/* -------- vbd_read_sub_main -------- */
 static char *tool_read_sub_main(yyjson_val *args, int *out_err)
 {
     (void)out_err;
     const int enc = arg_encoding(args);
-    char *code = vb_get_value(VB_GetSubMain, 0, 0);
+    char *code = vbd_get_value(VBD_GetSubMain, 0, 0);
     char *r = one_text_result("code", code ? code : "", enc, 1);
-    if (code) vbmcp_free(code);
+    if (code) vbdmcp_free(code);
     return r;
 }
 
-/* -------- vb_read_active_text -------- */
+/* -------- vbd_read_active_text -------- */
 static char *tool_read_active_text(yyjson_val *args, int *out_err)
 {
     (void)out_err;
     const int enc = arg_encoding(args);
-    char *text = vb_get_value(VB_GetActiveText, 0, 0);
+    char *text = vbd_get_value(VBD_GetActiveText, 0, 0);
     char *r = one_text_result("text", text ? text : "", enc, 1);
-    if (text) vbmcp_free(text);
+    if (text) vbdmcp_free(text);
     return r;
 }
 
-/* -------- vb_read_active_disasm_text -------- */
+/* -------- vbd_read_active_disasm_text -------- */
 static char *tool_read_active_disasm_text(yyjson_val *args, int *out_err)
 {
     (void)out_err;
     const int enc = arg_encoding(args);
-    char *text = vb_get_value(VB_GetActiveDisasmText, 0, 0);
+    char *text = vbd_get_value(VBD_GetActiveDisasmText, 0, 0);
     char *r = one_text_result("text", text ? text : "", enc, 1);
-    if (text) vbmcp_free(text);
+    if (text) vbdmcp_free(text);
     return r;
 }
 
-/* -------- vb_read_active_coords -------- */
+/* -------- vbd_read_active_coords -------- */
 static char *tool_read_active_coords(yyjson_val *args, int *out_err)
 {
     (void)out_err;
     const int enc = arg_encoding(args);
-    char *s = vb_get_value(VB_GetActiveModuleCoordinats, 0, 0);
+    char *s = vbd_get_value(VBD_GetActiveModuleCoordinats, 0, 0);
     char *r = one_text_result("coordinates", s ? s : "", enc, 0);
-    if (s) vbmcp_free(s);
+    if (s) vbdmcp_free(s);
     return r;
 }
 
-/* -------- vb_read_list_frx_icons -------- */
+/* -------- vbd_read_list_frx_icons -------- */
 static char *tool_read_list_frx_icons(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     long long limit, offset;
     read_paging(args, &limit, &offset);
 
-    char *count_str = vb_get_value(VB_GetFrxIconCount, 0, 0);
+    char *count_str = vbd_get_value(VBD_GetFrxIconCount, 0, 0);
     long long total = safe_parse_int(count_str, 0);
-    if (count_str) vbmcp_free(count_str);
+    if (count_str) vbdmcp_free(count_str);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
 
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     long long end = offset + limit;
     if (end > total) end = total;
     for (long long i = offset; i < end; i++) {
-        char *off  = vb_get_value(VB_GetFrxIconOffset, (int)i, 0);
-        char *size = vb_get_value(VB_GetFrxIconSize, (int)i, 0);
+        char *off  = vbd_get_value(VBD_GetFrxIconOffset, (int)i, 0);
+        char *size = vbd_get_value(VBD_GetFrxIconSize, (int)i, 0);
         yyjson_mut_val *item = yyjson_mut_arr_add_obj(doc, arr);
         if (item) {
             yyjson_mut_obj_add_int(doc, item, "index", i);
             add_text(doc, item, "offset", off ? off : "", enc);
             add_text(doc, item, "size", size ? size : "", enc);
         }
-        if (off) vbmcp_free(off);
-        if (size) vbmcp_free(size);
+        if (off) vbdmcp_free(off);
+        if (size) vbdmcp_free(size);
     }
     apply_pagination(doc, root, "icons", arr, total, offset, limit);
     return doc_to_string(doc);
@@ -658,90 +824,90 @@ static char *tool_read_list_frx_icons(yyjson_val *args, int *out_err)
  * 写入工具实现
  * ============================================================ */
 
-/* -------- vb_write_project_text -------- */
+/* -------- vbd_write_project_text -------- */
 static char *tool_write_project_text(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     const char *text = arg_str(args, "project_text");
-    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing required parameter: project_text"));
+    if (!text) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing required parameter: project_text"));
 
     size_t text_len = strlen(text);
-    if (text_len > VBMCP_MAX_PROJECT_TEXT) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+    if (text_len > VBDMCP_MAX_PROJECT_TEXT) {
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("project_text exceeds the 16MB limit (actual %zu bytes); please write it in chunks",
                text_len));
     }
 
-    set_text_value(VB_SetVBProject, text, enc, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetVBProject, text, enc, 0, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)text_len);
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_clear_buffers -------- */
+/* -------- vbd_write_clear_buffers -------- */
 static char *tool_write_clear_buffers(yyjson_val *args, int *out_err)
 {
     (void)args;
-    vb_set_value(VB_ClearAllBuffers, "", 0, 0);
+    vbd_set_value(VBD_ClearAllBuffers, "", 0, 0);
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_form -------- */
+/* -------- vbd_write_form -------- */
 static char *tool_write_form(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "form_index", -1);
     const char *text = arg_str(args, "form_text");
-    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
-    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing form_text"));
+    if (idx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (!text) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing form_text"));
     if ((long long)idx >= form_total()) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("form_index %d is out of range (the project has %lld forms)", idx, form_total()));
     }
 
-    set_text_value(VB_SetVBForm, text, enc, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetVBForm, text, enc, (int)idx, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "form_index", idx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_rename_form -------- */
+/* -------- vbd_write_rename_form -------- */
 static char *tool_write_rename_form(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "form_index", -1);
     const char *new_name = arg_str(args, "new_name");
-    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
-    if (!new_name) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if (idx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid form_index"));
+    if (!new_name) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
     if ((long long)idx >= form_total()) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("form_index %d is out of range (the project has %lld forms)", idx, form_total()));
     }
-    if (is_native_project()) return err_json(out_err, VBMCP_ERR_BUSINESS, _("rename_form is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
+    if (is_native_project()) return err_json(out_err, VBDMCP_ERR_BUSINESS, _("rename_form is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
 
-    set_text_value(VB_SetVBFormName, new_name, enc, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetVBFormName, new_name, enc, (int)idx, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "form_index", idx);
     /* 回显客户端原文（UTF-8），不回显引擎侧转换结果 */
     yyjson_mut_obj_add_strcpy(doc, root, "new_name", new_name);
@@ -749,80 +915,80 @@ static char *tool_write_rename_form(yyjson_val *args, int *out_err)
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_module -------- */
+/* -------- vbd_write_module -------- */
 static char *tool_write_module(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
     const char *decl = arg_str(args, "declarations");
-    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
-    if (!decl) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing declarations"));
+    if (idx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (!decl) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing declarations"));
     if ((long long)idx >= module_total()) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
     }
 
-    set_text_value(VB_SetModule, decl, enc, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetModule, decl, enc, (int)idx, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(decl));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_module_string_references -------- */
+/* -------- vbd_write_module_string_references -------- */
 static char *tool_write_module_string_references(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int idx = arg_index(args, "module_index", -1);
     const char *refs = arg_str(args, "string_references");
-    if (idx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
-    if (!refs) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing string_references"));
+    if (idx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index"));
+    if (!refs) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing string_references"));
     if ((long long)idx >= module_total()) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("module_index %d is out of range (the project has %lld modules)", idx, module_total()));
     }
 
-    set_text_value(VB_SetModuleStringReferences, refs, enc, (int)idx, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetModuleStringReferences, refs, enc, (int)idx, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", idx);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_function -------- */
+/* -------- vbd_write_function -------- */
 static char *tool_write_function(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int midx = arg_index(args, "module_index", -1);
     int fidx = arg_index(args, "function_index", -1);
     const char *code = arg_str(args, "code");
-    if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
-    if (!code) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
+    if (midx < 0 || fidx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (!code) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing code"));
     if ((long long)midx >= module_total() ||
         (long long)fidx >= module_function_total(midx)) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
                module_function_total(midx)));
     }
 
-    set_text_value(VB_SetModuleFunction, code, enc, (int)midx, (int)fidx);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetModuleFunction, code, enc, (int)midx, (int)fidx);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
     yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
@@ -830,30 +996,30 @@ static char *tool_write_function(yyjson_val *args, int *out_err)
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_rename_function -------- */
+/* -------- vbd_write_rename_function -------- */
 static char *tool_write_rename_function(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int midx = arg_index(args, "module_index", -1);
     int fidx = arg_index(args, "function_index", -1);
     const char *new_name = arg_str(args, "new_name");
-    if (midx < 0 || fidx < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
-    if (!new_name) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
+    if (midx < 0 || fidx < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid module_index/function_index"));
+    if (!new_name) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing new_name"));
     if ((long long)midx >= module_total() ||
         (long long)fidx >= module_function_total(midx)) {
-        return err_json(out_err, VBMCP_ERR_INVALID_PARAMS,
+        return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS,
             _F("function_index %d is out of range (module %d has %lld functions)", fidx, midx,
                module_function_total(midx)));
     }
-    if (is_native_project()) return err_json(out_err, VBMCP_ERR_BUSINESS, _("rename_function is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
+    if (is_native_project()) return err_json(out_err, VBDMCP_ERR_BUSINESS, _("rename_function is not supported on native-compiled projects (it would trigger a modal dialog that blocks the RPC call). Use it on a source-form VB project."));
 
-    set_text_value(VB_SetModuleFunctionName, new_name, enc, (int)midx, (int)fidx);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetModuleFunctionName, new_name, enc, (int)midx, (int)fidx);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "module_index", midx);
     yyjson_mut_obj_add_int(doc, root, "function_index", fidx);
     /* 回显客户端原文（UTF-8），不回显引擎侧转换结果 */
@@ -862,118 +1028,118 @@ static char *tool_write_rename_function(yyjson_val *args, int *out_err)
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_sub_main -------- */
+/* -------- vbd_write_sub_main -------- */
 static char *tool_write_sub_main(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     const char *code = arg_str(args, "code");
-    if (!code) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing code"));
+    if (!code) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing code"));
 
-    set_text_value(VB_SetSubMain, code, enc, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    set_text_value(VBD_SetSubMain, code, enc, 0, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(code));
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_active_text -------- */
+/* -------- vbd_write_active_text -------- */
 static char *tool_write_active_text(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
-    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
-    set_text_value(VB_SetActiveText, text, enc, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    if (!text) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    set_text_value(VBD_SetActiveText, text, enc, 0, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     yyjson_mut_obj_add_int(doc, root, "length", (long long)strlen(text));
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_active_disasm_text -------- */
+/* -------- vbd_write_active_disasm_text -------- */
 static char *tool_write_active_disasm_text(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
-    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
-    set_text_value(VB_SetActiveDisasmText, text, enc, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    if (!text) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    set_text_value(VBD_SetActiveDisasmText, text, enc, 0, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_goto_line -------- */
+/* -------- vbd_write_goto_line -------- */
 static char *tool_write_goto_line(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     int line = arg_index(args, "line", -1);
-    if (line < 0) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing or invalid line"));
+    if (line < 0) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing or invalid line"));
 
     char buf[32];
     _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%d", line);
-    vb_set_value(VB_SetActiveTextLine, buf, 0, 0);
+    vbd_set_value(VBD_SetActiveTextLine, buf, 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_int(doc, root, "line", line);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_status -------- */
+/* -------- vbd_write_status -------- */
 static char *tool_write_status(yyjson_val *args, int *out_err)
 {
     const int enc = arg_encoding(args);
     const char *text = arg_str(args, "text");
-    if (!text) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing text"));
-    set_text_value(VB_SetStatusBarText, text, enc, 0, 0);
+    if (!text) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing text"));
+    set_text_value(VBD_SetStatusBarText, text, enc, 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_options -------- */
+/* -------- vbd_write_options -------- */
 static char *tool_write_options(yyjson_val *args, int *out_err)
 {
-    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
+    if (!args || !yyjson_is_obj(args)) return err_json(out_err, VBDMCP_ERR_INVALID_PARAMS, _("Missing arguments object"));
     const char *stack    = arg_str(args, "stack_check");
     const char *analyzer = arg_str(args, "analyzer_check");
-    if (stack)    vb_set_value(VB_SetStackCheckBoxValue, stack, 0, 0);
-    if (analyzer) vb_set_value(VB_SetAnalyzerCheckBoxValue, analyzer, 0, 0);
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    if (stack)    vbd_set_value(VBD_SetStackCheckBoxValue, stack, 0, 0);
+    if (analyzer) vbd_set_value(VBD_SetAnalyzerCheckBoxValue, analyzer, 0, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
 
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     if (stack)    yyjson_mut_obj_add_strcpy(doc, root, "stack_check", stack);
     if (analyzer) yyjson_mut_obj_add_strcpy(doc, root, "analyzer_check", analyzer);
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
 
-/* -------- vb_write_update_all -------- */
+/* -------- vbd_write_update_all -------- */
 static char *tool_write_update_all(yyjson_val *args, int *out_err)
 {
     (void)args;
-    vb_set_value(VB_UpdateAll, "", 0, 0);
+    vbd_set_value(VBD_UpdateAll, "", 0, 0);
     yyjson_mut_val *root = NULL;
     yyjson_mut_doc *doc = new_obj_doc(&root);
-    if (!doc) return err_json(out_err, VBMCP_ERR_INTERNAL, _("Out of memory"));
+    if (!doc) return err_json(out_err, VBDMCP_ERR_INTERNAL, _("Out of memory"));
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ok");
     return doc_to_string(doc);
 }
@@ -988,7 +1154,7 @@ typedef struct {
     const char *name;
     const char *desc;       /* msgid */
     unsigned    params;     /* P_* 位掩码 */
-    int         is_write;   /* 1 = vb_write_*（需"允许写入"） */
+    int         is_write;   /* 1 = vbd_write_*（需"允许写入"） */
     int         destructive;
     int         idempotent;
     tool_impl_fn impl;
@@ -1008,50 +1174,55 @@ typedef struct {
 #define P_DECLARATIONS  (1u << 10)
 #define P_STRING_REFS   (1u << 11)
 #define P_OPTIONS       (1u << 12)
+#define P_QUERY         (1u << 13)
+/* 查找类工具的分页参数：默认 50 / 上限 1000（比列表工具的 100/10000 更小 ——
+ * 搜索命中通常会喂给 vbd_read_function 逐条读取，一次给太多会灌爆上下文）。 */
+#define P_FIND_PAGING   (1u << 14)
 
 static const tool_entry_t g_tools[] = {
     /* ---- 只读 ---- */
-    { "vb_read_project_info",        _("Get metadata of the project currently open in VB Decompiler: source file path, whether it is natively compiled, compiler type (VB/.NET/Delphi/Unknown), whether it is packed, and the VB Decompiler installation path. No parameters."),           0,                                 0, 0, 1, tool_read_project_info },
-    { "vb_read_project_text",        _("Get the text of the project file (.vbp manifest: project type, references, components, startup object). This is the project descriptor, NOT the concatenated decompiled source of every form/module - to read code, list the forms/modules (vb_read_list_forms / vb_read_list_modules) and read them one by one."),           0,                                 0, 0, 1, tool_read_project_text },
-    { "vb_read_list_forms",          _("List all VB Forms in the project. Supports pagination (limit/offset). Returns {count, forms:[...]}."),             P_PAGING,                          0, 0, 1, tool_read_list_forms },
-    { "vb_read_form",                _("Get the decompiled property text of the specified Form. Returns {form_index, form_name, form_text}."),               P_FORM_INDEX,                      0, 0, 1, tool_read_form },
-    { "vb_read_list_modules",        _("List all Modules in the project (standard .bas, class .cls, control .ctl). Supports pagination. Returns {count, modules:[...]}."),           P_PAGING,                          0, 0, 1, tool_read_list_modules },
-    { "vb_read_module",              _("Get the module's declarations header (all function/constant/type declarations) and string references."),             P_MODULE_INDEX,                    0, 0, 1, tool_read_module },
-    { "vb_read_list_module_functions", _("List all functions in the specified module. Supports pagination. Returns {module_index, count, functions:[{name,address,index}...]}."), P_MODULE_INDEX | P_PAGING,        0, 0, 1, tool_read_list_module_functions },
-    { "vb_read_function",            _("Get a function's decompiled code plus multiple views (fast/disassembly/string references). Returns {module_index, function_index, name, address, code, code_fast, disassembly, string_references}."),           P_MODULE_INDEX | P_FUNCTION_INDEX, 0, 0, 1, tool_read_function },
-    { "vb_read_sub_main",            _("Get the code of the program entry point Sub Main. No parameters."),           0,                                 0, 0, 1, tool_read_sub_main },
-    { "vb_read_active_text",         _("Get the text of the currently active code window (editor)."),        0,                                 0, 0, 1, tool_read_active_text },
-    { "vb_read_active_disasm_text",  _("Get the raw text of the active disassembly window."), 0,                                 0, 0, 1, tool_read_active_disasm_text },
-    { "vb_read_active_coords",       _("Get the module/function coordinates of the currently active view (e.g. \"ModuleIndex,FunctionIndex\")."),      0,                                 0, 0, 1, tool_read_active_coords },
-    { "vb_read_list_frx_icons",      _("List icons/images in the Form's FRX file: {count, icons:[{index,offset,size}]}. Supports pagination."),         P_PAGING,                          0, 0, 1, tool_read_list_frx_icons },
+    { "vbd_read_project_info",        _("Get metadata of the project currently open in VB Decompiler: source file path, whether it is natively compiled, compiler type (VB/.NET/Delphi/Unknown), whether it is packed, and the VB Decompiler installation path. No parameters."),           0,                                 0, 0, 1, tool_read_project_info },
+    { "vbd_read_project_text",        _("Get the text of the project file (.vbp manifest: project type, references, components, startup object). This is the project descriptor, NOT the concatenated decompiled source of every form/module - to read code, list the forms/modules (vbd_read_list_forms / vbd_read_list_modules) and read them one by one."),           0,                                 0, 0, 1, tool_read_project_text },
+    { "vbd_read_list_forms",          _("List all VB Forms in the project. Supports pagination (limit/offset). Returns {count, forms:[...]}."),             P_PAGING,                          0, 0, 1, tool_read_list_forms },
+    { "vbd_read_form",                _("Get the decompiled property text of the specified Form. Returns {form_index, form_name, form_text}."),               P_FORM_INDEX,                      0, 0, 1, tool_read_form },
+    { "vbd_read_list_modules",        _("List all Modules in the project (standard .bas, class .cls, control .ctl). Supports pagination. Returns {count, modules:[...]}."),           P_PAGING,                          0, 0, 1, tool_read_list_modules },
+    { "vbd_read_module",              _("Get the module's declarations header (all function/constant/type declarations) and string references."),             P_MODULE_INDEX,                    0, 0, 1, tool_read_module },
+    { "vbd_read_list_module_functions", _("List all functions in the specified module. Supports pagination. Returns {module_index, count, functions:[{name,address,index}...]}."), P_MODULE_INDEX | P_PAGING,        0, 0, 1, tool_read_list_module_functions },
+    { "vbd_read_function",            _("Get a function's decompiled code plus multiple views (fast/disassembly/string references). Returns {module_index, function_index, name, address, code, code_fast, disassembly, string_references}."),           P_MODULE_INDEX | P_FUNCTION_INDEX, 0, 0, 1, tool_read_function },
+    { "vbd_find_function",            _("Find functions by name substring (case-insensitive) or by address, accepting the display form shown by VB Decompiler (e.g. \"Proc_4_51_89CB90\", \"Command5\", \"0x89CB90\", \"9030544\"). Returns {count, total_count, matches:[{module_index, module_name, function_index, name, address, address_hex}]}; feed module_index + function_index to vbd_read_function."),           P_QUERY | P_MODULE_INDEX | P_FIND_PAGING, 0, 0, 1, tool_find_function },
+    { "vbd_read_sub_main",            _("Get the code of the program entry point Sub Main. No parameters."),           0,                                 0, 0, 1, tool_read_sub_main },
+    { "vbd_read_active_text",         _("Get the text of the currently active code window (editor)."),        0,                                 0, 0, 1, tool_read_active_text },
+    { "vbd_read_active_disasm_text",  _("Get the raw text of the active disassembly window."), 0,                                 0, 0, 1, tool_read_active_disasm_text },
+    { "vbd_read_active_coords",       _("Get the module/function coordinates of the currently active view (e.g. \"ModuleIndex,FunctionIndex\")."),      0,                                 0, 0, 1, tool_read_active_coords },
+    { "vbd_read_list_frx_icons",      _("List icons/images in the Form's FRX file: {count, icons:[{index,offset,size}]}. Supports pagination."),         P_PAGING,                          0, 0, 1, tool_read_list_frx_icons },
 
     /* ---- 写入 ---- */
-    { "vb_write_project_text",       _("Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI."),       P_PROJECT_TEXT,                    1, 1, 1, tool_write_project_text },
-    { "vb_write_clear_buffers",      _("Clear VB Decompiler's internal decompilation buffers. Use only when implementing a custom full decompilation workflow; discards all existing decompilation results."),          0,                                 1, 1, 1, tool_write_clear_buffers },
-    { "vb_write_form",               _("Replace the property text of the specified Form. Automatically calls UpdateAll."),               P_FORM_INDEX | P_FORM_TEXT,        1, 1, 1, tool_write_form },
-    { "vb_write_rename_form",        _("Rename a Form."),            P_FORM_INDEX | P_NEW_NAME,         1, 0, 1, tool_write_rename_form },
-    { "vb_write_module",             _("Replace the module's declarations header."),             P_MODULE_INDEX | P_DECLARATIONS,   1, 1, 1, tool_write_module },
-    { "vb_write_module_string_references", 0,                       P_MODULE_INDEX | P_STRING_REFS,    1, 1, 1, tool_write_module_string_references },
-    { "vb_write_function",           _("Replace a function's code."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_CODE, 1, 1, 1, tool_write_function },
-    { "vb_write_rename_function",    _("Rename a function."),        P_MODULE_INDEX | P_FUNCTION_INDEX | P_NEW_NAME, 1, 0, 1, tool_write_rename_function },
-    { "vb_write_sub_main",           _("Set the Sub Main code."),           P_CODE,                            1, 1, 1, tool_write_sub_main },
-    { "vb_write_active_text",        _("Set the text of the currently active code window. Automatically calls UpdateAll."),        P_TEXT,                            1, 0, 1, tool_write_active_text },
-    { "vb_write_active_disasm_text", _("Set the text of the active disassembly window."), P_TEXT,                            1, 0, 1, tool_write_active_disasm_text },
-    { "vb_write_goto_line",          _("Jump to the specified line in the code window (UI only, does not modify text)."),              P_LINE,                            1, 0, 1, tool_write_goto_line },
-    { "vb_write_status",             _("Set the text of VB Decompiler's bottom status bar (used to show MCP operation progress)."),             P_TEXT,                            1, 0, 1, tool_write_status },
-    { "vb_write_options",            _("Control decompilation options: the \"Parse stack parameters\" and \"Procedure analyzer and optimizer\" checkboxes. Omitting either parameter leaves the corresponding option unchanged."),            P_OPTIONS,                         1, 0, 1, tool_write_options },
-    { "vb_write_update_all",         _("Commit all Set modifications and refresh the GUI (tools normally call this automatically; call manually only after modifying large amounts of data externally)."),             0,                                 1, 0, 1, tool_write_update_all },
+    { "vbd_write_project_text",       _("Completely replace the project text with new text. Automatically calls UpdateAll to commit changes and refresh the GUI."),       P_PROJECT_TEXT,                    1, 1, 1, tool_write_project_text },
+    { "vbd_write_clear_buffers",      _("Clear VB Decompiler's internal decompilation buffers. Use only when implementing a custom full decompilation workflow; discards all existing decompilation results."),          0,                                 1, 1, 1, tool_write_clear_buffers },
+    { "vbd_write_form",               _("Replace the property text of the specified Form. Automatically calls UpdateAll."),               P_FORM_INDEX | P_FORM_TEXT,        1, 1, 1, tool_write_form },
+    { "vbd_write_rename_form",        _("Rename a Form."),            P_FORM_INDEX | P_NEW_NAME,         1, 0, 1, tool_write_rename_form },
+    { "vbd_write_module",             _("Replace the module's declarations header."),             P_MODULE_INDEX | P_DECLARATIONS,   1, 1, 1, tool_write_module },
+    { "vbd_write_module_string_references", 0,                       P_MODULE_INDEX | P_STRING_REFS,    1, 1, 1, tool_write_module_string_references },
+    { "vbd_write_function",           _("Replace a function's code."),           P_MODULE_INDEX | P_FUNCTION_INDEX | P_CODE, 1, 1, 1, tool_write_function },
+    { "vbd_write_rename_function",    _("Rename a function."),        P_MODULE_INDEX | P_FUNCTION_INDEX | P_NEW_NAME, 1, 0, 1, tool_write_rename_function },
+    { "vbd_write_sub_main",           _("Set the Sub Main code."),           P_CODE,                            1, 1, 1, tool_write_sub_main },
+    { "vbd_write_active_text",        _("Set the text of the currently active code window. Automatically calls UpdateAll."),        P_TEXT,                            1, 0, 1, tool_write_active_text },
+    { "vbd_write_active_disasm_text", _("Set the text of the active disassembly window."), P_TEXT,                            1, 0, 1, tool_write_active_disasm_text },
+    { "vbd_write_goto_line",          _("Jump to the specified line in the code window (UI only, does not modify text)."),              P_LINE,                            1, 0, 1, tool_write_goto_line },
+    { "vbd_write_status",             _("Set the text of VB Decompiler's bottom status bar (used to show MCP operation progress)."),             P_TEXT,                            1, 0, 1, tool_write_status },
+    { "vbd_write_options",            _("Control decompilation options: the \"Parse stack parameters\" and \"Procedure analyzer and optimizer\" checkboxes. Omitting either parameter leaves the corresponding option unchanged."),            P_OPTIONS,                         1, 0, 1, tool_write_options },
+    { "vbd_write_update_all",         _("Commit all Set modifications and refresh the GUI (tools normally call this automatically; call manually only after modifying large amounts of data externally)."),             0,                                 1, 0, 1, tool_write_update_all },
 
     { NULL, NULL, 0, 0, 0, 0, NULL }
 };
 
 /* 项目加载检查豁免名单：探测/控制类工具，不要求项目已加载。 */
 static const char *k_no_project_check[] = {
-    "vb_read_project_info",
-    "vb_write_status",
-    "vb_write_options",
-    "vb_write_update_all",
-    "vb_write_clear_buffers",
+    "vbd_read_project_info",
+    "vbd_write_status",
+    "vbd_write_options",
+    "vbd_write_update_all",
+    "vbd_write_clear_buffers",
     NULL
 };
 
@@ -1059,7 +1230,7 @@ static const tool_entry_t *find_tool(const char *name)
 {
     if (!name) return NULL;
     for (int i = 0; g_tools[i].name; i++) {
-        if (vb_streq(name, g_tools[i].name)) return &g_tools[i];
+        if (vbd_streq(name, g_tools[i].name)) return &g_tools[i];
     }
     return NULL;
 }
@@ -1082,41 +1253,41 @@ int mcp_local_tool_count(int allow_write)
 
 /* 分发工具调用。
  *   args          已解析的 arguments 对象（可为 NULL）
- *   allow_write   是否允许写入（只读模式下拒绝 vb_write_*）
- *   out_error_code 返回错误分类（VBMCP_ERR_*）；成功为 VBMCP_ERR_OK
- * 返回工具结果 JSON 字符串（new alloc，调用方 vbmcp_free）。 */
+ *   allow_write   是否允许写入（只读模式下拒绝 vbd_write_*）
+ *   out_error_code 返回错误分类（VBDMCP_ERR_*）；成功为 VBDMCP_ERR_OK
+ * 返回工具结果 JSON 字符串（new alloc，调用方 vbdmcp_free）。 */
 char *mcp_dispatch_tool(const char *tool_name, yyjson_val *args,
                         int allow_write, int *out_error_code)
 {
-    if (out_error_code) *out_error_code = VBMCP_ERR_OK;
+    if (out_error_code) *out_error_code = VBDMCP_ERR_OK;
 
     if (!tool_name || !*tool_name) {
-        return err_json(out_error_code, VBMCP_ERR_INVALID_PARAMS, _("Tool name is empty"));
+        return err_json(out_error_code, VBDMCP_ERR_INVALID_PARAMS, _("Tool name is empty"));
     }
 
     const tool_entry_t *e = find_tool(tool_name);
     if (!e) {
-        return err_json(out_error_code, VBMCP_ERR_INVALID_PARAMS, _F("Unknown tool: %s", tool_name));
+        return err_json(out_error_code, VBDMCP_ERR_INVALID_PARAMS, _F("Unknown tool: %s", tool_name));
     }
 
-    /* 防御兜底：只读模式下即便客户端绕过 listTools 强行调用 vb_write_*，
+    /* 防御兜底：只读模式下即便客户端绕过 listTools 强行调用 vbd_write_*，
      * 也在此二次校验权限，直接返回 MCP 权限错误，不执行业务。 */
     if (e->is_write && !allow_write) {
-        return err_json(out_error_code, VBMCP_ERR_PERMISSION, _("Write access is disabled. All vb_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings."));
+        return err_json(out_error_code, VBDMCP_ERR_PERMISSION, _("Write access is disabled. All vbd_write_* tools are unavailable in read-only mode. Ask the user to enable \"Allow MCP client to write project data\" in the VB Decompiler MCP settings."));
     }
 
     /* 集中项目加载检查 */
     int needs_check = 1;
     for (int j = 0; k_no_project_check[j]; j++) {
-        if (vb_streq(tool_name, k_no_project_check[j])) { needs_check = 0; break; }
+        if (vbd_streq(tool_name, k_no_project_check[j])) { needs_check = 0; break; }
     }
-    if (needs_check && !vb_is_project_loaded()) {
-        return err_json(out_error_code, VBMCP_ERR_BUSINESS,
-            _F("Project not loaded. The VB SDK provides no ReloadFile/Refresh API, so vbmcp cannot re-initialize the engine from the DLL side. Please open the vbmcp settings window from the Plugins menu in the VB Decompiler main window and click OK (this triggers a VBDecompilerPluginLoad re-entry). Tool called: %s",
+    if (needs_check && !vbd_is_project_loaded()) {
+        return err_json(out_error_code, VBDMCP_ERR_BUSINESS,
+            _F("Project not loaded. The VB SDK provides no ReloadFile/Refresh API, so vbdmcp cannot re-initialize the engine from the DLL side. Please open the vbdmcp settings window from the Plugins menu in the VB Decompiler main window and click OK (this triggers a VBDecompilerPluginLoad re-entry). Tool called: %s",
                tool_name));
     }
 
-    int err = VBMCP_ERR_OK;
+    int err = VBDMCP_ERR_OK;
     char *payload = e->impl(args, &err);
     /* 写操作可能改变模块/表单/函数列表：使模块名缓存失效 */
     if (e->is_write) g_write_generation++;
@@ -1129,7 +1300,7 @@ char *mcp_dispatch_tool(const char *tool_name, yyjson_val *args,
  *
  * annotations (MCP 2025-03 规范):
  *   readOnlyHint / destructiveHint / idempotentHint / openWorldHint
- * vbmcp 全部为本地工具，openWorldHint 恒为 false。
+ * vbdmcp 全部为本地工具，openWorldHint 恒为 false。
  * ============================================================ */
 
 static void param_int(yyjson_mut_doc *doc, yyjson_mut_val *props, const char *name,
@@ -1208,6 +1379,13 @@ static void add_params(yyjson_mut_doc *doc, yyjson_mut_val *props, unsigned flag
         param_str(doc, props, "declarations", NULL);
     if (flags & P_STRING_REFS)
         param_str(doc, props, "string_references", NULL);
+    if (flags & P_QUERY)
+        param_str(doc, props, "query",
+                  _("Function name substring (case-insensitive) or an address (decimal or 0x-hex). Accepts the display form shown by VB Decompiler, e.g. \"Proc_4_51_89CB90\"."));
+    if (flags & P_FIND_PAGING) {
+        param_int(doc, props, "limit",  1, 1000, 50, _("Maximum number of items to return"));
+        param_int(doc, props, "offset", 0, 0,     0, _("Start offset"));
+    }
     if (flags & P_OPTIONS) {
         param_onoff(doc, props, "stack_check");
         param_onoff(doc, props, "analyzer_check");
@@ -1242,7 +1420,7 @@ static void build_one_tool(yyjson_mut_doc *doc, yyjson_mut_val *arr, const tool_
 }
 
 /* 把当前权限下可见的工具追加到调用方提供的数组（不创建新 doc）。
- * allow_write=0 时只追加 vb_read_*，=1 时追加全部。 */
+ * allow_write=0 时只追加 vbd_read_*，=1 时追加全部。 */
 void mcp_build_tools_into(yyjson_mut_doc *doc, yyjson_mut_val *arr, int allow_write)
 {
     if (!doc || !arr) return;

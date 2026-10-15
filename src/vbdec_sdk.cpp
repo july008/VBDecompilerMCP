@@ -9,11 +9,11 @@
  *
  * 线程安全：VB Decompiler 是 GUI 单线程应用，Callback Engine 只能从
  *           主线程（VB Decompiler 消息循环所在线程）调用。
- *           因此 vb_get_value / vb_set_value 只能在 UI 主线程调用 ——
+ *           因此 vbd_get_value / vbd_set_value 只能在 UI 主线程调用 ——
  *           mcp_http.cpp 的网络线程通过 UiTask 队列把所有工具调用投递到主线程，
  *           后台线程绝不直接调用本文件里的任何函数。
  */
-#include "vbmcp.h"
+#include "vbdmcp.h"
 #include <strsafe.h>
 #include <excpt.h>     /* SEH（MSVC）：EXCEPTION_ACCESS_VIOLATION 等 */
 
@@ -37,17 +37,17 @@ TVBPluginEngine g_engine = NULL;
  */
 static TVBPluginEngine g_pending_engine = NULL;
 
-void vb_sdk_init(TVBPluginEngine engine)
+void vbd_sdk_init(TVBPluginEngine engine)
 {
     /* 总是缓存，包括 NULL。PluginLoad 第二次调用时 plugin_engine 是有效的。 */
     g_pending_engine = engine;
     g_engine = engine;
-    vbmcp_log("vb_sdk_init: engine=%p (pending cached)", (void *)engine);
+    vbdmcp_log("vbd_sdk_init: engine=%p (pending cached)", (void *)engine);
 }
 
 /*
  * 内部辅助：调用引擎并把 UTF-16 返回值转换为 ANSI（Codepage = CP_ACP，与原SDK一致）。
- * 返回值为 new alloc 的 ANSI 字符串，调用方 vbmcp_free。
+ * 返回值为 new alloc 的 ANSI 字符串，调用方 vbdmcp_free。
  * 失败返回 NULL。
  */
 static char *engine_get_to_ansi(int vlType, int vlNumber, int vlFnNumber)
@@ -61,7 +61,7 @@ static char *engine_get_to_ansi(int vlType, int vlNumber, int vlFnNumber)
         p = g_engine(vlType, vlNumber, vlFnNumber, NULL);
     } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
                 EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
-        vbmcp_log("engine_get_to_ansi: AV at g_engine (vlType=%d, vlNumber=%d), "
+        vbdmcp_log("engine_get_to_ansi: AV at g_engine (vlType=%d, vlNumber=%d), "
                   "clearing engine pointers", vlType, vlNumber);
         /* 清空防止下次再 AV（用户没点 Plugins 菜单之前所有工具都会失败） */
         g_engine = NULL;
@@ -73,7 +73,7 @@ static char *engine_get_to_ansi(int vlType, int vlNumber, int vlFnNumber)
     const wchar_t *wstr = (const wchar_t *)p;
     int len = WideCharToMultiByte(CP_ACP, 0, wstr, -1, NULL, 0, NULL, NULL);
     if (len <= 0) return NULL;
-    char *out = (char *)vbmcp_alloc((size_t)len);
+    char *out = (char *)vbdmcp_alloc((size_t)len);
     if (!out) return NULL;
     WideCharToMultiByte(CP_ACP, 0, wstr, -1, out, len, NULL, NULL);
     return out;
@@ -90,9 +90,9 @@ static char *engine_get_to_ansi(int vlType, int vlNumber, int vlFnNumber)
  *   - vc/VBDecC.cpp 走 C++ wrapper（ANSI）
  *
  * 引擎在 Set 路径上**存储指针不拷贝**（demo 全部 leak 以避免 use-after-free）。
- * 我们也传 ANSI 透传 + 故意 leak（不用 vbmcp_alloc，否则日后有人误调 vbmcp_free）。
+ * 我们也传 ANSI 透传 + 故意 leak（不用 vbdmcp_alloc，否则日后有人误调 vbdmcp_free）。
  * 代价与风险：每次 Set 漏一份字符串。普通字段（端口/索引/标志）很小，但
- * **vb_write_project_text 之类工具单次可传 16MB** —— AI 客户端反复写大文件就是几百 MB 的常驻泄漏。
+ * **vbd_write_project_text 之类工具单次可传 16MB** —— AI 客户端反复写大文件就是几百 MB 的常驻泄漏。
  * 所以这里累计泄漏量并在跨过阈值时告警，让“隐形泄漏”变成日志里看得见的事实。
  *
  * 不再转 UTF-16：之前转 UTF-16 后引擎读 ANSI 字节序会得到 `H\0e\0...` ，
@@ -106,9 +106,9 @@ static void note_set_leak(size_t n)
     const size_t total = g_set_leak_bytes.fetch_add(n) + n;
     for (size_t thr : kWarnAt) {
         if (total >= thr && total - n < thr) {
-            vbmcp_logf(VBMCP_LOG_WARN,
+            vbdmcp_logf(VBDMCP_LOG_WARN,
                        "engine Set leak reached %.1f MB (engine keeps every pointer; "
-                       "large vb_write_project_text calls are the main contributor)",
+                       "large vbd_write_project_text calls are the main contributor)",
                        (double)total / (1024.0 * 1024.0));
             break;
         }
@@ -130,7 +130,7 @@ static void *engine_set_from_ansi(int vlType, int vlNumber, int vlFnNumber, cons
         r = g_engine(vlType, vlNumber, vlFnNumber, buf);
     } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
                 EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
-        vbmcp_log("engine_set_from_ansi: AV at g_engine (vlType=%d, vlNumber=%d), "
+        vbdmcp_log("engine_set_from_ansi: AV at g_engine (vlType=%d, vlNumber=%d), "
                   "clearing engine pointers", vlType, vlNumber);
         g_engine = NULL;
         g_pending_engine = NULL;
@@ -153,64 +153,64 @@ static void *engine_set_from_ansi(int vlType, int vlNumber, int vlFnNumber, cons
  *       每次 MCP 工具调用前，如果 g_engine 还是 NULL 但 g_pending_engine 有值，
  *       就用缓存的 engine 重新初始化。
  *
- * 历史 Layer 2 "heartbeat"（调 VB_SetStatusBarText）已移除 —— 实测无法
+ * 历史 Layer 2 "heartbeat"（调 VBD_SetStatusBarText）已移除 —— 实测无法
  * 修复 "PluginLoad 没重入" 的问题，并且当 g_engine 指向已失效的函数指针
  * （用户切换项目后 engine 被 reset）时直接导致 Access Violation。
  * 现在依赖 "Plugins 菜单 → 配置窗口 → 点确定" 的手动工作流来触发
  * PluginLoad 重入（plugin_main.cpp::VBDecompilerPluginLoad）。
  *
- * 项目状态探测由调用方通过 vb_is_project_loaded() 显式完成 —— SDK
+ * 项目状态探测由调用方通过 vbd_is_project_loaded() 显式完成 —— SDK
  * 不暴露 "ReloadFile / RefreshEngine / ReInitPlugin" 这类 API。
  */
-static void vb_ensure_engine(void)
+static void vbd_ensure_engine(void)
 {
     if (!g_engine && g_pending_engine) {
         g_engine = g_pending_engine;
-        vbmcp_log("vb_ensure_engine: lazy init from pending, engine=%p",
+        vbdmcp_log("vbd_ensure_engine: lazy init from pending, engine=%p",
                   (void *)g_engine);
     }
 }
 
 /* --------- 公共API --------- */
 
-char *vb_get_value(int vlType, int vlNumber, int vlFnNumber)
+char *vbd_get_value(int vlType, int vlNumber, int vlFnNumber)
 {
-    vb_ensure_engine();
+    vbd_ensure_engine();
     return engine_get_to_ansi(vlType, vlNumber, vlFnNumber);
 }
 
-void vb_set_value(int vlType, const char *value, int vlNumber, int vlFnNumber)
+void vbd_set_value(int vlType, const char *value, int vlNumber, int vlFnNumber)
 {
-    vb_ensure_engine();
+    vbd_ensure_engine();
     engine_set_from_ansi(vlType, vlNumber, vlFnNumber, value);
 }
 
-void vb_set_status(const char *msg)
+void vbd_set_status(const char *msg)
 {
-    vb_set_value(VB_SetStatusBarText, msg, 0, 0);
+    vbd_set_value(VBD_SetStatusBarText, msg, 0, 0);
 }
 
 /*
  * 项目加载状态探测。
  *
  * 返回：
- *   1 = 已加载（VB_GetFileName 返回非空字符串）
+ *   1 = 已加载（VBD_GetFileName 返回非空字符串）
  *   0 = 未加载或 g_engine 不可用
  *
  * 用于 MCP 工具 handler 在调用前判断。如果返回 0，应给客户端返回
- * 带解决方法的错误："请在 VB Decompiler 的 Plugins 菜单打开 vbmcp
+ * 带解决方法的错误："请在 VB Decompiler 的 Plugins 菜单打开 vbdmcp
  * 配置窗口，点确定以触发 PluginLoad 重入"。
  *
  * 注意：此函数**只读不修复**。SDK 不暴露 "ReloadFile / RefreshEngine"
- * 等 API，"Plugins 菜单点确定"是 VB Decompiler 私有路径，vbmcp 无
+ * 等 API，"Plugins 菜单点确定"是 VB Decompiler 私有路径，vbdmcp 无
  * 法从 DLL 侧模拟。
  */
-int vb_is_project_loaded(void)
+int vbd_is_project_loaded(void)
 {
-    vb_ensure_engine();
+    vbd_ensure_engine();
     if (!g_engine) return 0;
-    char *fn = engine_get_to_ansi(VB_GetFileName, 0, 0);
+    char *fn = engine_get_to_ansi(VBD_GetFileName, 0, 0);
     int loaded = (fn != NULL && fn[0] != '\0');
-    if (fn) vbmcp_free(fn);
+    if (fn) vbdmcp_free(fn);
     return loaded ? 1 : 0;
 }

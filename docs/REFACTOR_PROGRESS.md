@@ -24,8 +24,8 @@
 | J | i18n 改造：删除 `T_*` 双语数组，改为 `_()` + `lang_res/zh.json` + DLL 内嵌资源 | ✅ 完成 |
 | M | 优化批次（P0–P4）：工程卫生 / 协议一致性 / 健壮性 / UTF-8 编码桥 / 测试工具 | ✅ 完成（详见第八节） |
 
-编译状态：`msbuild vbmcp.sln /p:Configuration=Release /p:Platform=Win32`
-→ **0 error / 0 warning**，产物 `Win32\Release\vbmcp.dll`。
+编译状态：`msbuild vbdmcp.sln /p:Configuration=Release /p:Platform=Win32`
+→ **0 error / 0 warning**，产物 `Win32\Release\vbdmcp.dll`。
 
 ---
 
@@ -33,15 +33,15 @@
 
 | # | 要求 | 状态 | 实现位置 / 说明 |
 |---|---|---|---|
-| 1.1 | 默认固定监听 `127.0.0.1`，端口可配置，**绝不默认 0.0.0.0** | ✅ | `vbmcp.h: VBMCP_DEFAULT_BIND/VBMCP_LOOPBACK_BIND`；`mcp_http.cpp: create_listen_socket()` 只用 `vbmcp_bind_address()` 快照 |
+| 1.1 | 默认固定监听 `127.0.0.1`，端口可配置，**绝不默认 0.0.0.0** | ✅ | `vbdmcp.h: VBDMCP_DEFAULT_BIND/VBDMCP_LOOPBACK_BIND`；`mcp_http.cpp: create_listen_socket()` 只用 `vbdmcp_bind_address()` 快照 |
 | 1.2 | 开放局域网需手动修改 + 高危警告，且选项默认隐藏 | ✅ | `options_dialog.cpp`：`IDC_CHK_LAN_ADVANCED` 默认未勾选、绑定框 `EnableWindow(FALSE)`；勾选/确定时 `confirm_open_bind_warning()` 弹高危警告，用户拒绝则强制回环 |
 | 2.1 | 移除旧版一次性 HTTP，实现 MCP Streamable HTTP（SSE） | ✅ | `mcp_http.cpp`：`POST /mcp`（JSON-RPC）、`GET /mcp`（SSE 长连接）、`DELETE /mcp`（终止会话）；`/health` 用 yyjson 构造；旧的 `/debug/*` 回显端点已移除 |
 | 2.2 | SSE 服务端推送 + 心跳保活 | ✅ | `sse_begin()` / `sse_push_json()` / `sse_heartbeat_all()`（15s `: ping` 注释帧）；权限变化时主动推送 `notifications/tools/list_changed` |
 | 2.3 | CORS 禁止 `*`，默认不返回 CORS 头 | ✅ | `origin_is_trusted()`：注册表 `CorsOrigins` 为空 → 一个 CORS 头都不发；命中白名单才回显该 origin；通配 `*` 被显式忽略 |
-| 3.1 | `listTools` 等预检**不弹窗** | ✅ | 仅 `handle_tools_call()` 内调用 `vbmcp_session_authorize()`；`initialize/ping/tools/list` 直接放行 |
-| 3.2 | 第一条 `callTool` 弹窗展示客户端连接信息 | ✅ | `mcp_rpc.cpp: vbmcp_session_authorize()`，`MessageBoxA` 展示 `client_info`（如 `127.0.0.1:52341`），在 **UI 主线程** 弹出 |
+| 3.1 | `listTools` 等预检**不弹窗** | ✅ | 仅 `handle_tools_call()` 内调用 `vbdmcp_session_authorize()`；`initialize/ping/tools/list` 直接放行 |
+| 3.2 | 第一条 `callTool` 弹窗展示客户端连接信息 | ✅ | `mcp_rpc.cpp: vbdmcp_session_authorize()`，`MessageBoxA` 展示 `client_info`（如 `127.0.0.1:52341`），在 **UI 主线程** 弹出 |
 | 3.3 | 允许本次会话 / 拒绝；拒绝后拒绝所有后续请求 | ✅ | `g_session_authorized` / `g_session_denied` 原子标志；拒绝后所有 `tools/call` 返回 `-32001` 权限错误 |
-| 3.4 | 服务重启后授权重置，下次新连接再次弹窗 | ✅ | `vbmcp_server_stop()` → `vbmcp_session_reset()`；另外「所有客户端断开」也重置（`g_session_was_used`） |
+| 3.4 | 服务重启后授权重置，下次新连接再次弹窗 | ✅ | `vbdmcp_server_stop()` → `vbdmcp_session_reset()`；另外「所有客户端断开」也重置（`g_session_was_used`） |
 | 3.5 | 准入授权不替代读写开关 | ✅ | 准入只放行会话；`g_allow_write` 独立控制 `write_*` 工具可见性与可调用性 |
 
 **Streamable HTTP 细节实现**
@@ -59,11 +59,11 @@
 
 | # | 要求 | 状态 | 实现位置 / 说明 |
 |---|---|---|---|
-| 1 | 设置窗体新增「允许 MCP 客户端写入项目数据」，默认未勾选 | ✅ | `options_dialog.cpp: IDC_CHK_ALLOW_WRITE`；`VBMCP_DEFAULT_ALLOW_WRITE=0`；持久化到注册表 `AllowWrite` |
-| 2 | 工具严格分 `vb_read_*` / `vb_write_*` 两组 | ✅ | `mcp_tools.cpp: g_tools[]`（13 只读 + 15 写入 = 28）；命名规范见 `docs/DEVELOPMENT.md` |
-| 3 | `listTools` 按权限动态生成清单 | ✅ | `mcp_build_tools_into(doc, arr, allow_write)`：只读模式只输出 `vb_read_*` |
+| 1 | 设置窗体新增「允许 MCP 客户端写入项目数据」，默认未勾选 | ✅ | `options_dialog.cpp: IDC_CHK_ALLOW_WRITE`；`VBDMCP_DEFAULT_ALLOW_WRITE=0`；持久化到注册表 `AllowWrite` |
+| 2 | 工具严格分 `vbd_read_*` / `vbd_write_*` 两组 | ✅ | `mcp_tools.cpp: g_tools[]`（13 只读 + 15 写入 = 28）；命名规范见 `docs/DEVELOPMENT.md` |
+| 3 | `listTools` 按权限动态生成清单 | ✅ | `mcp_build_tools_into(doc, arr, allow_write)`：只读模式只输出 `vbd_read_*` |
 | 4 | `callTool` 入口二次权限校验（防绕过） | ✅ | 三道闸：① `mcp_rpc.cpp` `handle_tools_call()` 显式校验；② `mcp_tools.cpp: mcp_dispatch_tool()` 校验；③ 写入工具实现只在 UI 线程执行 |
-| 5 | 权限变化自动通知客户端 | ✅ | 设置窗体确定且写入权限变化 → `vbmcp_notify_tools_list_changed()` → SSE 广播 `notifications/tools/list_changed` |
+| 5 | 权限变化自动通知客户端 | ✅ | 设置窗体确定且写入权限变化 → `vbdmcp_notify_tools_list_changed()` → SSE 广播 `notifications/tools/list_changed` |
 | 6 | 权限模式状态可见 | ✅ | 设置窗体「服务设置」页的「权限模式」字段显示「只读」/「读写」 |
 
 ---
@@ -72,15 +72,15 @@
 
 | # | 要求 | 状态 | 实现位置 / 说明 |
 |---|---|---|---|
-| 1 | 项目代码从 C 迁移为 C++，保持业务逻辑，做好内存安全 | ✅ | `src/*.c` → `src/*.cpp`（git mv 保留历史）；工程改为 `stdcpp17` + `/EHa`；新增 `src/vbmcp_mem.hpp`（`SocketHandle`/`unique_ptr`/`ScopeGuard` RAII） |
+| 1 | 项目代码从 C 迁移为 C++，保持业务逻辑，做好内存安全 | ✅ | `src/*.c` → `src/*.cpp`（git mv 保留历史）；工程改为 `stdcpp17` + `/EHa`；新增 `src/vbdmcp_mem.hpp`（`SocketHandle`/`unique_ptr`/`ScopeGuard` RAII） |
 | 2 | 删除全部自研 JSON 编解码，完整替换为 yyjson | ✅ | `third_party/yyjson` 以 `CompileAsC` 参与编译；`src/json.c/.h` 已删除；`mcp_http.cpp` 的 `/health`、错误文档全部走 `yyjson_mut_*` |
 | 2b | 说明：需求文档第三节写 "RapidJSON"，第七节硬性约束写 "yyjson（源码在 third_party\yyjson）" | ✅ 按第七节执行 | 采用 **yyjson**（仓库内已内置，零新增依赖），并已删除全部手写 JSON 代码 |
-| 3 | 所有 MCP 请求入口 try-catch，单请求失败不崩 UI | ✅ | 双层保护：`mcp_http.cpp: task_pump_on_ui_thread()`（`catch (const std::exception&) / catch(...)`）+ `mcp_rpc.cpp: vbmcp_process_jsonrpc()`；引擎调用另保留原有 SEH `__try` 保护 |
+| 3 | 所有 MCP 请求入口 try-catch，单请求失败不崩 UI | ✅ | 双层保护：`mcp_http.cpp: task_pump_on_ui_thread()`（`catch (const std::exception&) / catch(...)`）+ `mcp_rpc.cpp: vbdmcp_process_jsonrpc()`；引擎调用另保留原有 SEH `__try` 保护 |
 | 4.1 | 服务运行在后台独立线程，禁止后台线程操作 UI | ✅ | `mcp_http.cpp: network_thread_main()` 仅做 socket/HTTP；无任何 UI/引擎调用 |
-| 4.2 | 需要 UI/工程数据的请求经任务队列投递到 UI 主线程 | ✅ | `UiTask` + 隐藏消息窗口 `VBMCP_TASK_V1`（`VBMCP_WM_TASK`）+ `task_pump_on_ui_thread()` |
-| 4.3 | 支持任务超时、取消令牌 | ✅ | 超时 `VBMCP_TASK_TIMEOUT_MS`（默认 30s，可用环境变量覆盖）；`cancelled` 原子令牌在「客户端断开 / 超时 / 服务停止」时置位，未执行任务直接丢弃 |
-| 4.4 | 限制并发任务数量，防止 UI 卡死/竞态 | ✅ | `VBMCP_MAX_PENDING_TASKS=8`，队列满立即 `429` + `-32003` 繁忙错误 |
-| 4.5 | 跨线程共享状态安全 | ✅ | `g_enabled/g_port/g_allow_write` 改 `std::atomic<int>`；绑定地址走互斥量 + `vbmcp_bind_address()`；日志写文件用临界区串行化 |
+| 4.2 | 需要 UI/工程数据的请求经任务队列投递到 UI 主线程 | ✅ | `UiTask` + 隐藏消息窗口 `VBDMCP_TASK_V1`（`VBDMCP_WM_TASK`）+ `task_pump_on_ui_thread()` |
+| 4.3 | 支持任务超时、取消令牌 | ✅ | 超时 `VBDMCP_TASK_TIMEOUT_MS`（默认 30s，可用环境变量覆盖）；`cancelled` 原子令牌在「客户端断开 / 超时 / 服务停止」时置位，未执行任务直接丢弃 |
+| 4.4 | 限制并发任务数量，防止 UI 卡死/竞态 | ✅ | `VBDMCP_MAX_PENDING_TASKS=8`，队列满立即 `429` + `-32003` 繁忙错误 |
+| 4.5 | 跨线程共享状态安全 | ✅ | `g_enabled/g_port/g_allow_write` 改 `std::atomic<int>`；绑定地址走互斥量 + `vbdmcp_bind_address()`；日志写文件用临界区串行化 |
 
 ---
 
@@ -88,11 +88,11 @@
 
 | # | 要求 | 状态 | 实现位置 / 说明 |
 |---|---|---|---|
-| 1 | callTool 返回 MCP 标准错误对象，区分权限/参数/超时/内部错误 | ✅ | `vbmcp.h: VBMCP_ERR_PERMISSION(-32001) / TIMEOUT(-32002) / BUSY(-32003) / INTERNAL(-32603) / INVALID_PARAMS(-32602)`；业务错误走 `isError:true` 内容通道 |
+| 1 | callTool 返回 MCP 标准错误对象，区分权限/参数/超时/内部错误 | ✅ | `vbdmcp.h: VBDMCP_ERR_PERMISSION(-32001) / TIMEOUT(-32002) / BUSY(-32003) / INTERNAL(-32603) / INVALID_PARAMS(-32602)`；业务错误走 `isError:true` 内容通道 |
 | 2 | transport 异常与 MCP 应用层错误分离 | ✅ | `http_send_error()`：HTTP 状态码（400/404/405/406/413/415/429）表达传输语义，body 内 `{code,message}` 表达协议语义 |
 | 3 | SSE 连接断开时终止后台任务、释放资源 | ✅ | `client_gone()` 探测 FIN；断开即 `cancelled=true` + 清空 `send_buf`；`SocketHandle` RAII 自动 `closesocket`；`UiTask` 用 `shared_ptr` 生命周期托管 |
-| 4 | 最大请求体限制 + 基础限流 + 防畸形/超大 payload | ✅ | `VBMCP_MAX_BODY_SIZE`(64MB) + `VBMCP_MAX_HEADER_SIZE`(16KB) + `Content-Length` 数字校验 + 全局 200 req/s 限流 + 单连接上限 64 |
-| 5 | 分级日志，不泄露源码敏感信息 | ✅ | `VBMCP_LOG_ERROR/WARN/INFO/DEBUG`；仅记录连接、工具名、权限判定、错误分类与耗时，**不记录任何项目文本/源码内容**；`VBMCP_DEBUG_LOG=1` 开启，`VBMCP_LOG_LEVEL` 控阈值 |
+| 4 | 最大请求体限制 + 基础限流 + 防畸形/超大 payload | ✅ | `VBDMCP_MAX_BODY_SIZE`(64MB) + `VBDMCP_MAX_HEADER_SIZE`(16KB) + `Content-Length` 数字校验 + 全局 200 req/s 限流 + 单连接上限 64 |
+| 5 | 分级日志，不泄露源码敏感信息 | ✅ | `VBDMCP_LOG_ERROR/WARN/INFO/DEBUG`；仅记录连接、工具名、权限判定、错误分类与耗时，**不记录任何项目文本/源码内容**；`VBDMCP_DEBUG_LOG=1` 开启，`VBDMCP_LOG_LEVEL` 控阈值 |
 
 ---
 
@@ -143,8 +143,8 @@
 | 项 | 改造前 | 改造后 |
 |---|---|---|
 | 词条载体 | `lang.h` 的 `T_*` 枚举 + `lang.cpp: g_strings[T_COUNT]` 双语数组（107 条） | `lang_res/zh.json`（msgid→msgstr，当前 98 条），随源码提交 |
-| 取串API | `vbmcp_t(T_X)`（GBK）/ `vbmcp_t_utf8(T_X)`（UTF-8） | `_()`（UTF-8）/ `_A()`（GBK）/ `_F()` / `_AF()` / `N_()` |
-| 加载方式 | 进程内静态表 | `RCDATA("JSON_ZH")` **嵌入 vbmcp.dll** → `GetModuleHandleExA(FROM_ADDRESS)` 取本模块句柄 → `FindResourceA`/`LoadResource` → yyjson 解析 → khash 查表 |
+| 取串API | `vbdmcp_t(T_X)`（GBK）/ `vbdmcp_t_utf8(T_X)`（UTF-8） | `_()`（UTF-8）/ `_A()`（GBK）/ `_F()` / `_AF()` / `N_()` |
+| 加载方式 | 进程内静态表 | `RCDATA("JSON_ZH")` **嵌入 vbdmcp.dll** → `GetModuleHandleExA(FROM_ADDRESS)` 取本模块句柄 → `FindResourceA`/`LoadResource` → yyjson 解析 → khash 查表 |
 | 外部依赖 | 无 | **无外部 langpack.dll**（资源就在本 DLL 内） |
 | 内存管理 | `g_gbk[][]` 缓存（进程退出才回收） | `I18n_Clear()` 释放表内 strdup 的 key/value + yyjson 文档；`DllMain(DLL_PROCESS_DETACH)` 调 `I18n_PrepareShutdown()`（先关闭查表再释放） |
 | 词条同步 | 手工维护 C 数组 | `python tools/extract_i18n.py` 扫描 `_()/N_()/_A()/_F()/_AF()`，合并语言包 + 生成待翻译清单 + `--check` CI 校验 + `--prune` 清理失效词条 |
@@ -161,7 +161,7 @@
    语义是"立即消费"（控件 API 会立刻拷贝），避免嵌套调用互相覆盖，也避免每次
    都 malloc。
 4. **未翻译词条回退英文原文**（而不是空串），并由 `I18n_GetText()` 统一兜底。
-5. **工具名不翻译**：`vb_read_*` / `vb_write_*` 是 MCP 协议标识符，
+5. **工具名不翻译**：`vbd_read_*` / `vbd_write_*` 是 MCP 协议标识符，
    `g_tools[]` 的 `name` 字段保持字面量，只有 `desc` 走 `_()`。
 6. **khash 子集**（`src/khash.h`）：只需"字符串键 → 指针值"，实现 FNV-1a + 开放寻址，
    约 200 行；与上游 khash 语义一致（不拥有 key/value 内存，`kh_put` 的 `ret`
@@ -196,7 +196,7 @@
 4. 分组框标题含 `&` 被 BS_GROUPBOX 当助记符吞掉 → 改为 "Permissions and security"；
 5. 两段说明按 2/3 比例分配导致中间大片空白 → 改为按内容固定高度。
 
-新增 `VBMCP_LANG=zh|en` 环境变量（优先于注册表），可在不修改 VB Decompiler 语言设置的前提下验证双语界面。
+新增 `VBDMCP_LANG=zh|en` 环境变量（优先于注册表），可在不修改 VB Decompiler 语言设置的前提下验证双语界面。
 
 ### 阶段 K 补记：150% 缩放下的两个问题
 
@@ -213,17 +213,17 @@
 ## 五之五、设置窗体改为资源模板（阶段 L）
 
 设置窗体原来是纯代码创建窗口（`create_child_controls()` + 自定义 WndProc），
-先改成 `DialogBoxParamA` + `res/vbmcp.rc` 的 `DIALOGEX` 模板；随后按"资源编辑器里
+先改成 `DialogBoxParamA` + `res/vbdmcp.rc` 的 `DIALOGEX` 模板；随后按"资源编辑器里
 控件应按属性页分组"的要求，进一步拆成**一个属性页一个模板**。
 
 | 项 | 之前 | 现在 |
 |---|---|---|
-| 控件树 | 代码 `CreateWindowExA` | `res/vbmcp.rc` 三个 `DIALOGEX`：`IDD_VBMCP_OPTIONS`(2000, shell) / `IDD_PAGE_SERVER`(2001) / `IDD_PAGE_ACCESS`(2002) |
+| 控件树 | 代码 `CreateWindowExA` | `res/vbdmcp.rc` 三个 `DIALOGEX`：`IDD_VBDMCP_OPTIONS`(2000, shell) / `IDD_PAGE_SERVER`(2001) / `IDD_PAGE_ACCESS`(2002) |
 | 窗体窗口过程 | 自定义 `WndProc` + 手写模态循环 | `DialogBoxParamA` + 对话框过程 `dlg_proc()`（父窗自动禁用、`EndDialog` 收尾） |
 | 控件寻址 | `GetDlgItem(hDlg, id)` | `find_ctl(id)` / `set_text` / `get_check` / `send_ctl`（跨三个窗口按 ID 寻址） |
 | 属性页切换 | 按 ID 数组批量 `ShowWindow` | `apply_tab()` 显示/隐藏两个页窗口 |
 | 页内消息 | 控件父窗就是对话框 | `page_dlg_proc()` 转发 `WM_COMMAND`/`WM_NOTIFY` 给 shell，并就地处理 `WM_CTLCOLOR*` |
-| ID 单一来源 | 散落各处字面量 | `res/vbmcp.rc` 顶部 `#define` → `tools/gen_ids_header.py` 生成 `src/vbmcp_ids.h`（`--check` 校验） |
+| ID 单一来源 | 散落各处字面量 | `res/vbdmcp.rc` 顶部 `#define` → `tools/gen_ids_header.py` 生成 `src/vbdmcp_ids.h`（`--check` 校验） |
 
 **为什么必须一页一个模板**：rc 的对话框模板是扁平的，一个模板内所有控件都是兄弟，
 表达不了"属于哪个属性页"，资源编辑器自然无法分组。改成每页一个模板后，
@@ -239,7 +239,7 @@
    （`ClientToScreen` 再 `ScreenToClient`）；只换算一次会把页窗口丢到屏幕左上角。
 
 验证方式：`tools/ui_preview` 除截图外，新增把页窗口/页内控件坐标、两个页是否独立、
-`WM_COMMAND` 转发结果写进 `%TEMP%\vbmcp_ui_probe.txt`；中英文 × 默认/放大四张截图
+`WM_COMMAND` 转发结果写进 `%TEMP%\vbdmcp_ui_probe.txt`；中英文 × 默认/放大四张截图
 逐张核对。
 
 
@@ -259,9 +259,9 @@
 4. **批量请求**：按规范允许服务端拒绝，本实现显式返回 `400`，不做批量合并。
 5. ~~`src/i18n.c` 未完成的历史实验~~ → **已解决（阶段 J）**：`src/i18n.cpp` +
    `src/khash.h` 正式实现并参与编译，`lang_res/zh.json` 以 `RCDATA("JSON_ZH")`
-   嵌入 `vbmcp.dll`，`lang.cpp/lang.h` 的 `T_*` 双语数组已删除。
+   嵌入 `vbdmcp.dll`，`lang.cpp/lang.h` 的 `T_*` 双语数组已删除。
 6. ~~`strbuf.cpp`~~ → **已删除（阶段 M）**：HTTP 头拼装改用 `std::string`，
-   编码转换归入 `util.cpp`（`vbmcp_str_to_gbk` / `vbmcp_acp_to_utf8`），
+   编码转换归入 `util.cpp`（`vbdmcp_str_to_gbk` / `vbdmcp_acp_to_utf8`），
    仓库中不再存在该模块。
 7. **待办（本批未做）**：会话 id 跨连接映射表；工具描述精简（当前最长约 260 字符，
    占用 AI 上下文）；协议版本向 2025-06-18 演进评估；`/health` 的 `pid` 字段在
@@ -274,10 +274,10 @@
 由于插件依赖 VB Decompiler 主进程，以下项目需在装有 VB Decompiler 的机器上实测：
 
 - [ ] 默认配置启动：`/health` 返回 `readOnly:true`、`tools_count=13`
-- [ ] `tools/list` 只返回 13 个 `vb_read_*`
+- [ ] `tools/list` 只返回 13 个 `vbd_read_*`
 - [ ] 设置窗体「服务设置」页勾选「允许写入」→ 「权限模式」显示读写 → 切到「接入信息」页后 `tools/list` 返回 28 个工具
 - [ ] 首个 `tools/call` 弹窗：选择「是」后可调用，`选择「否」后所有 callTool 返回 `-32001`
-- [ ] 只读模式下强行调用 `vb_write_project_text` → 返回 `-32001`，项目内容未变
+- [ ] 只读模式下强行调用 `vbd_write_project_text` → 返回 `-32001`，项目内容未变
 - [ ] 属性页切换正常：两页内容互不遮挡，底部按钮在两页都可用
 - [ ] 资源编辑器里 `IDD_PAGE_SERVER` / `IDD_PAGE_ACCESS` 各自只含本页控件（无跨页混排）
 - [ ] 页内控件交互正常：勾选框/下拉框/端口输入框在对应页内即生效（消息转发链）
@@ -288,7 +288,7 @@
 - [ ] 切换写入权限时，已连接的 SSE 客户端收到 `notifications/tools/list_changed`
 - [ ] `DELETE /mcp` 后再带旧 `Mcp-Session-Id` 请求 → `404`
 - [ ] 连续并发 10 个大工具调用 → 多余请求返回 `429` + `-32003`，UI 不卡死
-- [ ] 单请求超时（`VBMCP_TASK_TIMEOUT_MS=2000` + 大项目读取）→ 返回 `-32002`
+- [ ] 单请求超时（`VBDMCP_TASK_TIMEOUT_MS=2000` + 大项目读取）→ 返回 `-32002`
 - [ ] 关闭 MCP 客户端（不关服务）→ 日志出现 `task cancelled`，无残留任务
 - [ ] 发送 100MB body → `413`；发送畸形 HTTP 头 → `400`
 - [ ] 中文项目「读 → 修改 → 写 → 回读」全链路一致（默认 `utf-8`；`encoding:"gbk"` 回退旧行为）
@@ -307,7 +307,7 @@
 
 | 项 | 内容 | 主要位置 |
 |---|---|---|
-| P0-1 | `.gitignore` 修正：`tools/` 脚本与测试工程入库，产物 / `.vs` / `__pycache__` 忽略；`Win32/Release/vbmcp.dll` 停止跟踪 | `.gitignore` |
+| P0-1 | `.gitignore` 修正：`tools/` 脚本与测试工程入库，产物 / `.vs` / `__pycache__` 忽略；`Win32/Release/vbdmcp.dll` 停止跟踪 | `.gitignore` |
 | P0-2 | 阶段 A–L 成果分批提交（2 个提交），工作树归零 | git 历史 |
 | P1-1 | `initialize` 只声明实际实现的 tools 能力，`listChanged=1`（与广播行为对齐）；删除未实现的 prompts/resources 声明 | `mcp_rpc.cpp` |
 | P1-2 | 工具描述去掉残留的手写 JSON 转义（`\"0\"=off` → `"0"=off, "1"=on`） | `mcp_tools.cpp` + `lang_res/zh.json` |
@@ -323,7 +323,7 @@
 | P2-6 | 模块名列表进程内缓存（写操作 / 项目文件名变化失效） | `mcp_tools.cpp` |
 | P2-7 | 日志合并为单实现 + 单文件 10MB 自动轮转（`.old`） | `util.cpp` |
 | P2-8 | 非回环监听时 `/health` 只返回文件名，不暴露宿主绝对路径 | `mcp_http.cpp` |
-| P4-3a | `vbmcp_server_start` 的 bind 等待由 `Sleep` 忙等改为条件变量（最多 3 秒） | `mcp_http.cpp` |
+| P4-3a | `vbdmcp_server_start` 的 bind 等待由 `Sleep` 忙等改为条件变量（最多 3 秒） | `mcp_http.cpp` |
 | D-1 | **UTF-8 编码桥（用户决议）**：读侧 ANSI→UTF-8、写侧 UTF-8→ANSI；全部工具新增可选参数 `encoding`（默认 `utf-8`，`gbk` 回退字节透传）；含自由文本的结果带 `encoding` 字段；`initialize.instructions` 声明契约 | `util.cpp` + `mcp_tools.cpp/h` + `mcp_rpc.cpp` |
 | D-3 | 工具错误码改为显式 `int *out_err` 回传，删除全局 `g_tool_err` | `mcp_tools.cpp/h` |
 | D-4 | （既有能力）引擎 Set 泄漏分级告警；SECURITY.md 按实际泄漏量级如实描述 | `vbdec_sdk.cpp` / `SECURITY.md` |
@@ -335,7 +335,7 @@
 
 | 验证项 | 结果 |
 |---|---|
-| Release 构建（`msbuild vbmcp.sln /p:Configuration=Release /p:Platform=Win32`） | 0 error / 0 warning |
+| Release 构建（`msbuild vbdmcp.sln /p:Configuration=Release /p:Platform=Win32`） | 0 error / 0 warning |
 | `tools/selftest`（编码桥往返 / i18n 纯函数 / 工具 schema） | 26 checks, 0 failure |
 | `python tools/extract_i18n.py --check` | 98 词条，新增 0 / 待翻译 0 / 失效 0（zh 全译） |
 | `python tools/gen_ids_header.py --check` | 34 个 ID 同步 |
@@ -362,7 +362,7 @@
 | initialize 协商 | 此前固定回 `2025-03-26` | 新增 `negotiate_protocol_version()`：按客户端 `params.protocolVersion` 回同一版本（客户端会据此设置后续请求头），`/health` 展示协商结果 |
 | Accept 校验 | POST 要求 `Accept` 必须含 `application/json`，只声明 `text/event-stream` 的客户端会被 `406` | 放宽：命中 `application/json` 或 `text/event-stream` 其一（或未携带）即放行（响应体始终是 JSON） |
 | chunked 传输 | `Transfer-Encoding: chunked` 被当成空 body，报误导性的 parse error | 明确回 `400` + `send Content-Length instead`；MCP 客户端均使用 Content-Length，不做 chunked 解码 |
-| 诊断日志 | "连不上"时看不到请求头细节 | DEBUG 级请求日志增加 `accept` / `content-type` / 协议版本 / 会话摘要；排查时开 `VBMCP_DEBUG_LOG=1` 看每行请求与 WARN 级 `transport error` |
+| 诊断日志 | "连不上"时看不到请求头细节 | DEBUG 级请求日志增加 `accept` / `content-type` / 协议版本 / 会话摘要；排查时开 `VBDMCP_DEBUG_LOG=1` 看每行请求与 WARN 级 `transport error` |
 
 ### 8.6 严重缺陷修复：accept 阻塞导致服务器完全不响应（用户反馈：CodeBuddy 连不上）
 
@@ -384,7 +384,7 @@
    `WSAEWOULDBLOCK` 退出，不再阻塞；
 2. accept 出的连接 socket 显式设非阻塞（不依赖继承行为）：recv/send 的
    `WSAEWOULDBLOCK` 分支按设计工作，顺带消除"慢客户端阻塞大响应 send"的隐患；
-3. `VBMCP_MAX_CONNECTIONS` 64 → 60：`fd_set` 还要放 listener，且 Windows 的
+3. `VBDMCP_MAX_CONNECTIONS` 64 → 60：`fd_set` 还要放 listener，且 Windows 的
    `FD_SET` 在满时会**静默忽略**新句柄（那些连接会不被 select 监视、静默挂起）。
 
 **验证**：新增 `tools/mcp_e2e`（本机把真实网络/RPC/工具代码跑成完整服务器，
@@ -432,7 +432,7 @@
 
 | 调用 | 宿主显示位置（读取前后） |
 |---|---|
-| 正常读取（`vb_read_form` / `vb_read_function` / `vb_read_active_text`） | **不变**（无副作用） |
+| 正常读取（`vbd_read_form` / `vbd_read_function` / `vbd_read_active_text`） | **不变**（无副作用） |
 | 越界索引读取 | GUI 清空（引擎内部坐标变量不变） |
 
 即：引擎为了返回窗体/模块文本会在内部定位该项；越界时定位到空项，
@@ -444,3 +444,34 @@ GUI 随之变空。**读取本身没有副作用，越界才是。**
 
 **恢复方法**（若再次遇到）：在 VB Decompiler 左侧 Forms/Modules 列表中
 点击任意项、或切换列表/标签页，界面即恢复显示。
+
+### 8.9 修复：`vbd_read_function` 会切换宿主当前定位（用户反馈：左侧面板被清空）
+
+**现象**：调用 `vbd_read_function` 后，VB Decompiler 的当前显示被切到目标函数；
+在 **native 项目**下目标位置的内容不会随之重新加载，表现为"左侧面板被清空"
+（定位仍在，工程数据也未丢失）。
+
+**排查**（用 MCP 调用**前后对比** `vbd_read_active_coords`，逐个读工具验证）：
+
+| 工具 | 读前 → 读后 | 结论 |
+|---|---|---|
+| `vbd_read_function` | `2,8` → `26,7` | ❌ 切换宿主定位 |
+| `vbd_read_module` / `vbd_read_list_module_functions` / `vbd_read_form` / `vbd_read_list_forms` / `vbd_read_list_modules` / `vbd_read_project_info` / `vbd_read_sub_main` | 前后一致 | ✅ 无副作用 |
+
+**根因**：引擎为生成**函数级视图**（`code` / `code_fast` / `disassembly` /
+`string_references`）会在内部把宿主定位切换到该函数。列表 / 元信息 / 模块级 /
+窗体级数据不触发定位，因此其它工具都无此副作用。
+
+**修复**（`mcp_tools.cpp`）：
+
+1. 函数视图的读取抽成 `read_all_function_views()`（6 个视图、固定顺序）；
+2. `vbd_read_function` 在读取前用 `VBD_GetActiveModuleCoordinats` 记下原坐标，
+   读取完成后**按同一视图序列**再读一遍原位置，把宿主定位切回去；
+3. 原位置与目标位置相同时跳过恢复（不产生多余引擎调用）。
+
+**教训（首版修复无效）**：第一版恢复只读 `code` **单个视图** —— 实测无效
+（宿主定位仍停在目标函数）：切换是由该组视图里的某一个触发的，恢复必须复用
+**完全相同**的调用序列并保持顺序。
+
+**验证**（真机，MCP 调用前后对比坐标）：连续读取两个不同函数（`{2,8}`、`{1,20}`）
+后，`active_coords` 均保持读取前的 `26,7` **不变**；修复前同样的操作会把它切走。

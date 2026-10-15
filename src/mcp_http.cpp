@@ -9,9 +9,9 @@
  *               执行完成后唤醒网络线程回写 HTTP 响应。
  *
  *   - 所有需要 UI / 工程数据的请求都经 UiTask 投递，绝不跨线程直接调用；
- *   - 每个任务支持超时（VBMCP_TASK_TIMEOUT_MS，默认 30s）与取消令牌
+ *   - 每个任务支持超时（VBDMCP_TASK_TIMEOUT_MS，默认 30s）与取消令牌
  *     （客户端断开 / 超时 / 服务停止时置位；尚未执行的任务会被直接丢弃）；
- *   - 并发上限 VBMCP_MAX_PENDING_TASKS：队列满时立即返回 429 + MCP 繁忙错误，
+ *   - 并发上限 VBDMCP_MAX_PENDING_TASKS：队列满时立即返回 429 + MCP 繁忙错误，
  *     避免多个 MCP 请求同时触发大项目反编译导致 UI 卡死 / 竞态。
  *
  * ============================ 传输规范（MCP 2025-03-26） ============================
@@ -24,10 +24,10 @@
  * 安全模型：默认只监听 127.0.0.1；默认不返回任何 CORS 头（禁止 `*`）；
  * 请求体大小上限 + 全局基础限流 + 畸形 JSON 由 yyjson 安全拒绝。
  */
-#include "vbmcp.h"
+#include "vbdmcp.h"
 #include "mcp_tools.h"
 #include "i18n.h"
-#include "vbmcp_mem.hpp"
+#include "vbdmcp_mem.hpp"
 #include "yyjson.h"
 
 #include <algorithm>
@@ -43,10 +43,10 @@
 /* ============================================================
  * 全局状态定义
  * ============================================================ */
-std::atomic<int> g_enabled{ VBMCP_DEFAULT_ENABLED };
-std::atomic<int> g_port{ VBMCP_DEFAULT_PORT };
+std::atomic<int> g_enabled{ VBDMCP_DEFAULT_ENABLED };
+std::atomic<int> g_port{ VBDMCP_DEFAULT_PORT };
 /* 允许 MCP 客户端写入项目数据（UI 配置，默认只读）。UI 主线程写、网络线程读。 */
-std::atomic<int> g_allow_write{ VBMCP_DEFAULT_ALLOW_WRITE };
+std::atomic<int> g_allow_write{ VBDMCP_DEFAULT_ALLOW_WRITE };
 
 namespace {
 
@@ -57,22 +57,22 @@ constexpr int kSelectTimeoutMs  = 50;      /* 循环轮询间隔（同时保证�
  * 即重连）。开销仅为每 5 秒 8 字节。 */
 constexpr int kSseHeartbeatMs   = 5000;
 constexpr int kRateLimitPerSec  = 200;     /* 全局基础限流 */
-constexpr int kTaskQueueLimit   = VBMCP_MAX_PENDING_TASKS;
+constexpr int kTaskQueueLimit   = VBDMCP_MAX_PENDING_TASKS;
 /* 单连接待发缓冲上限：SSE 通知/心跳只追加不等待，客户端不读时必须有上限，
  * 否则一个僵死连接就能把进程内存吃光。超限直接断开该连接。 */
 constexpr size_t kMaxSendBufferBytes = 4u * 1024 * 1024;
 
 /* ---------------- 绑定地址（UI 线程写，网络线程读） ---------------- */
 std::mutex  g_bind_mu;
-std::string g_bind_addr = VBMCP_DEFAULT_BIND;
+std::string g_bind_addr = VBDMCP_DEFAULT_BIND;
 
 /* ---------------- 协议版本 ---------------- */
-/* 协议版本串：UI 线程在 initialize 时写入（vbmcp_http_set_protocol_version），
+/* 协议版本串：UI 线程在 initialize 时写入（vbdmcp_http_set_protocol_version），
  * 网络线程在 /health 里读。原来是 char[32] + strncpy_s —— 写 32 字节过程中
  * 并发读可能拿到半截字符串（和 i18n 那次同类问题）。
  * 现在改成"UI 线程分配一份、原子发布指针"：读者永远看到完整字符串。
  * 旧值故意不释放（进程级、每客户端会话才换一次，几十字节）。 */
-std::atomic<const char*> g_active_protocol_version{ VBMCP_PROTOCOL };
+std::atomic<const char*> g_active_protocol_version{ VBDMCP_PROTOCOL };
 
 /* ---------------- 连接对象 ---------------- */
 struct Connection;
@@ -97,7 +97,7 @@ struct UiTask {
 };
 
 struct Connection {
-    vbmcp::SocketHandle sock;
+    vbdmcp::SocketHandle sock;
     std::string   peer;
     std::string   recv_buf;
     std::string   send_buf;
@@ -121,7 +121,7 @@ std::thread       g_net_thread;
 std::atomic<bool> g_net_running{ false };
 std::atomic<bool> g_net_inited{ false };
 std::atomic<bool> g_winsock_inited{ false };
-/* bind 完成（含失败）通知：vbmcp_server_start 等待它，替代 Sleep 忙等 */
+/* bind 完成（含失败）通知：vbdmcp_server_start 等待它，替代 Sleep 忙等 */
 std::mutex              g_net_init_mu;
 std::condition_variable g_net_init_cv;
 std::atomic<bool>       g_net_init_done{ false };
@@ -162,7 +162,7 @@ const std::string& cors_list_cached()
 {
     if (!g_cors_loaded.load(std::memory_order_acquire)) {
         char list[1024] = {0};
-        vbmcp_config_get_cors_origins(list, sizeof(list));
+        vbdmcp_config_get_cors_origins(list, sizeof(list));
         g_cors_list = list;
         g_cors_loaded.store(true, std::memory_order_release);
     }
@@ -296,7 +296,7 @@ std::string make_session_id()
 /* ============================================================
  * 连接写出
  * ============================================================ */
-int vbmcp_flush(Connection* c)
+int vbdmcp_flush(Connection* c)
 {
     while (c->send_off < c->send_buf.size()) {
         int r = send(c->sock.get(), c->send_buf.data() + c->send_off,
@@ -341,7 +341,7 @@ void http_send_raw(Connection* c, int status, const char* content_type,
     c->send_buf += body;
     c->close_after_send = !keep_alive;
     c->want_write = true;
-    vbmcp_flush(c);
+    vbdmcp_flush(c);
 }
 
 void http_send_json(Connection* c, int status, const std::string& origin,
@@ -356,7 +356,7 @@ void http_send_error(Connection* c, int http_status, int jsonrpc_code,
                      const char* message, const std::string& origin = std::string())
 {
     http_send_json(c, http_status, origin, json_error_document(jsonrpc_code, message));
-    vbmcp_logf(VBMCP_LOG_WARN, "transport error http=%d code=%d msg=%s (client=%s)",
+    vbdmcp_logf(VBDMCP_LOG_WARN, "transport error http=%d code=%d msg=%s (client=%s)",
                http_status, jsonrpc_code, message ? message : "", c->peer.c_str());
 }
 
@@ -385,14 +385,14 @@ void sse_begin(Connection* c, const std::string& origin)
     head += "\r\n";
 
     c->send_buf += head;
-    c->send_buf += ": vbmcp sse stream open\n\n";
+    c->send_buf += ": vbdmcp sse stream open\n\n";
     c->close_after_send = false;
     c->want_write = true;
-    vbmcp_flush(c);
+    vbdmcp_flush(c);
 
     c->is_sse = true;
     c->last_active = std::chrono::steady_clock::now();
-    vbmcp_logf(VBMCP_LOG_INFO, "sse stream opened (client=%s session=%s)",
+    vbdmcp_logf(VBDMCP_LOG_INFO, "sse stream opened (client=%s session=%s)",
                c->peer.c_str(), c->session_id.c_str());
 }
 
@@ -400,7 +400,7 @@ void sse_push_json(Connection* c, const std::string& json)
 {
     if (!c->is_sse) return;
     if (c->send_buf.size() + json.size() > kMaxSendBufferBytes) {
-        vbmcp_logf(VBMCP_LOG_WARN,
+        vbdmcp_logf(VBDMCP_LOG_WARN,
                    "sse send buffer overflow (%zu bytes pending), dropping client (client=%s)",
                    c->send_buf.size(), c->peer.c_str());
         c->dead = true;                 /* 主循环下一轮回收该连接 */
@@ -410,7 +410,7 @@ void sse_push_json(Connection* c, const std::string& json)
     c->send_buf += json;
     c->send_buf += "\n\n";
     c->want_write = true;
-    vbmcp_flush(c);
+    vbdmcp_flush(c);
 }
 
 void sse_heartbeat_all(std::vector<std::unique_ptr<Connection>>& conns)
@@ -422,7 +422,7 @@ void sse_heartbeat_all(std::vector<std::unique_ptr<Connection>>& conns)
             now - c->last_active).count();
         if (idle < kSseHeartbeatMs) continue;
         if (c->send_buf.size() > kMaxSendBufferBytes) {
-            vbmcp_logf(VBMCP_LOG_WARN,
+            vbdmcp_logf(VBDMCP_LOG_WARN,
                        "sse send buffer overflow (%zu bytes pending), dropping client (client=%s)",
                        c->send_buf.size(), c->peer.c_str());
             c->dead = true;
@@ -431,7 +431,7 @@ void sse_heartbeat_all(std::vector<std::unique_ptr<Connection>>& conns)
         c->send_buf += ": ping\n\n";
         c->want_write = true;
         c->last_active = now;
-        vbmcp_flush(c.get());
+        vbdmcp_flush(c.get());
     }
 }
 
@@ -450,7 +450,7 @@ void flush_list_changed_notification(std::vector<std::unique_ptr<Connection>>& c
     for (auto& c : conns) {
         if (c && c->is_sse && c->sock.valid()) {
             sse_push_json(c.get(), payload);
-            vbmcp_logf(VBMCP_LOG_INFO, "sse push notifications/tools/list_changed (client=%s)",
+            vbdmcp_logf(VBDMCP_LOG_INFO, "sse push notifications/tools/list_changed (client=%s)",
                        c->peer.c_str());
         }
     }
@@ -492,13 +492,13 @@ int parse_request(const std::string& buf, HttpRequest& out)
 {
     const std::size_t hdr_end = buf.find("\r\n\r\n");
     if (hdr_end == std::string::npos) {
-        if (buf.size() > VBMCP_MAX_HEADER_SIZE) return -1;
+        if (buf.size() > VBDMCP_MAX_HEADER_SIZE) return -1;
         return 0;
     }
     const std::size_t headers_len = hdr_end + 4;
     /* 头部长度必须独立校验：只靠"未找到分隔符时"的检查会放过
      * 一次到齐的超长头部（例如 1MB 头部 + 小 body 的单次 send）。 */
-    if (headers_len > (std::size_t)VBMCP_MAX_HEADER_SIZE) return -1;
+    if (headers_len > (std::size_t)VBDMCP_MAX_HEADER_SIZE) return -1;
     const std::string headers = buf.substr(0, headers_len);
 
     const std::size_t sp1 = headers.find(' ');
@@ -510,7 +510,7 @@ int parse_request(const std::string& buf, HttpRequest& out)
     out.path   = headers.substr(sp1 + 1, sp2 - sp1 - 1);
     const std::size_t q = out.path.find('?');
     if (q != std::string::npos) out.path.resize(q);
-    if (out.path.size() > VBMCP_MAX_HEADER_SIZE) return -1;
+    if (out.path.size() > VBDMCP_MAX_HEADER_SIZE) return -1;
 
     out.origin           = header_value(headers, "Origin");
     out.content_type     = header_value(headers, "Content-Type");
@@ -529,7 +529,7 @@ int parse_request(const std::string& buf, HttpRequest& out)
         for (char ch : cl) {
             if (ch < '0' || ch > '9') return -1;
             content_length = content_length * 10 + (std::size_t)(ch - '0');
-            if (content_length > VBMCP_MAX_BODY_SIZE) return -2;
+            if (content_length > VBDMCP_MAX_BODY_SIZE) return -2;
         }
     }
 
@@ -545,9 +545,9 @@ bool protocol_version_supported(const std::string& v)
     /* 客户端在 initialize 响应之后会把协商到的版本放进该头；
      * 因此这里必须接受整个支持集合（否则新 SDK 客户端会被 400 拒掉，
      * 表现为"无法连接"）。 */
-    return v == VBMCP_PROTOCOL_2025_06_18 ||
-           v == VBMCP_PROTOCOL_2025_03_26 ||
-           v == VBMCP_PROTOCOL_LEGACY;
+    return v == VBDMCP_PROTOCOL_2025_06_18 ||
+           v == VBDMCP_PROTOCOL_2025_03_26 ||
+           v == VBDMCP_PROTOCOL_LEGACY;
 }
 
 bool accept_has(const std::string& accept, const char* token)
@@ -575,12 +575,12 @@ bool task_queue_push(std::shared_ptr<UiTask> task)
         g_task_queue.push_back(std::move(task));
     }
     if (g_task_hwnd && ::IsWindow(g_task_hwnd)) {
-        ::PostMessage(g_task_hwnd, VBMCP_WM_TASK, 0, 0);
+        ::PostMessage(g_task_hwnd, VBDMCP_WM_TASK, 0, 0);
     }
     return true;
 }
 
-/* UI 主线程：在 VBMCP_WM_TASK 消息里调用，串行执行队列任务。 */
+/* UI 主线程：在 VBDMCP_WM_TASK 消息里调用，串行执行队列任务。 */
 void task_pump_on_ui_thread()
 {
     for (;;) {
@@ -594,18 +594,18 @@ void task_pump_on_ui_thread()
 
         if (task->cancelled.load()) {
             /* 已被取消：排队期间客户端断开 / 超时 / 服务停止 —— 不执行业务 */
-            task->response = json_error_document(VBMCP_ERR_BUSY, "request cancelled");
+            task->response = json_error_document(VBDMCP_ERR_BUSY, "request cancelled");
             task->http_status = 200;
         } else {
             /* MCP 请求入口 try-catch：任何 C++ 异常都不允许带崩 VB Decompiler UI */
             try {
                 int is_init = 0;
-                vbmcp::OwnedString resp(
-                    vbmcp_process_jsonrpc(task->body.c_str(), task->peer.c_str(), &is_init));
+                vbdmcp::OwnedString resp(
+                    vbdmcp_process_jsonrpc(task->body.c_str(), task->peer.c_str(), &is_init));
                 if (is_init) task->is_initialize.store(true);
                 if (!resp) {
                     task->http_status = 200;
-                    task->response = json_error_document(VBMCP_ERR_INTERNAL, "out of memory");
+                    task->response = json_error_document(VBDMCP_ERR_INTERNAL, "out of memory");
                 } else if (resp.get()[0] == '\0') {
                     task->http_status = 202;          /* notification：无响应体 */
                     task->response.clear();
@@ -614,13 +614,13 @@ void task_pump_on_ui_thread()
                     task->response = resp.get();
                 }
             } catch (const std::exception& e) {
-                vbmcp_logf(VBMCP_LOG_ERROR, "tool call threw std::exception: %s", e.what());
+                vbdmcp_logf(VBDMCP_LOG_ERROR, "tool call threw std::exception: %s", e.what());
                 task->http_status = 200;
-                task->response = json_error_document(VBMCP_ERR_INTERNAL, "internal error");
+                task->response = json_error_document(VBDMCP_ERR_INTERNAL, "internal error");
             } catch (...) {
-                vbmcp_logf(VBMCP_LOG_ERROR, "tool call threw unknown exception");
+                vbdmcp_logf(VBDMCP_LOG_ERROR, "tool call threw unknown exception");
                 task->http_status = 200;
-                task->response = json_error_document(VBMCP_ERR_INTERNAL, "internal error");
+                task->response = json_error_document(VBDMCP_ERR_INTERNAL, "internal error");
             }
         }
 
@@ -635,7 +635,7 @@ void task_pump_on_ui_thread()
 /* UI 主线程的消息窗口：只负责把网络线程投递的任务搬到 UI 上执行 */
 LRESULT CALLBACK task_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (msg == VBMCP_WM_TASK) {
+    if (msg == VBDMCP_WM_TASK) {
         task_pump_on_ui_thread();
         return 0;
     }
@@ -659,8 +659,8 @@ std::string build_health_document()
     yyjson_mut_obj_add_strcpy(doc, root, "status", "ready");
 
     yyjson_mut_val* server = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, server, "name", VBMCP_PLUGIN_NAME);
-    yyjson_mut_obj_add_strcpy(doc, server, "version", VBMCP_VERSION);
+    yyjson_mut_obj_add_strcpy(doc, server, "name", VBDMCP_PLUGIN_NAME);
+    yyjson_mut_obj_add_strcpy(doc, server, "version", VBDMCP_VERSION);
     yyjson_mut_obj_add_strcpy(doc, server, "protocolVersion",
                               g_active_protocol_version.load(std::memory_order_acquire));
     yyjson_mut_obj_add_val(doc, root, "server", server);
@@ -671,7 +671,7 @@ std::string build_health_document()
     yyjson_mut_obj_add_strcpy(doc, inst, "arch", "Win32");
     yyjson_mut_obj_add_int(doc, inst, "bits", 32);
     /* 非回环（局域网）监听时不暴露宿主绝对安装路径，只给文件名 */
-    const bool loopback = (vbmcp_bind_address() == VBMCP_LOOPBACK_BIND);
+    const bool loopback = (vbdmcp_bind_address() == VBDMCP_LOOPBACK_BIND);
     yyjson_mut_obj_add_strcpy(doc, inst, "path", loopback ? exepath : fname);
     yyjson_mut_obj_add_int(doc, inst, "pid", (long long)GetCurrentProcessId());
     yyjson_mut_obj_add_bool(doc, inst, "local", loopback);
@@ -700,28 +700,28 @@ void handle_mcp_post(Connection* c, const HttpRequest& req)
     if (!req.accept.empty() &&
         !accept_has(req.accept, "application/json") &&
         !accept_has(req.accept, "text/event-stream")) {
-        http_send_error(c, 406, VBMCP_ERR_INVALID_REQUEST,
+        http_send_error(c, 406, VBDMCP_ERR_INVALID_REQUEST,
                         "Accept must include application/json or text/event-stream", req.origin);
         return;
     }
     if (!req.content_type.empty() &&
         req.content_type.find("application/json") == std::string::npos) {
-        http_send_error(c, 415, VBMCP_ERR_INVALID_REQUEST,
+        http_send_error(c, 415, VBDMCP_ERR_INVALID_REQUEST,
                         "Content-Type must be application/json", req.origin);
         return;
     }
     if (!protocol_version_supported(req.protocol_version)) {
-        http_send_error(c, 400, VBMCP_ERR_INVALID_REQUEST,
+        http_send_error(c, 400, VBDMCP_ERR_INVALID_REQUEST,
                         "unsupported MCP-Protocol-Version", req.origin);
         return;
     }
     if (!req.session_id.empty() && !c->session_id.empty() &&
         req.session_id != c->session_id) {
-        http_send_error(c, 404, VBMCP_ERR_INVALID_REQUEST, "unknown session id", req.origin);
+        http_send_error(c, 404, VBDMCP_ERR_INVALID_REQUEST, "unknown session id", req.origin);
         return;
     }
     if (!rate_limit_allow()) {
-        http_send_error(c, 429, VBMCP_ERR_BUSY, "Too many requests", req.origin);
+        http_send_error(c, 429, VBDMCP_ERR_BUSY, "Too many requests", req.origin);
         return;
     }
 
@@ -729,19 +729,19 @@ void handle_mcp_post(Connection* c, const HttpRequest& req)
     std::size_t i = 0;
     while (i < req.body.size() && (req.body[i] == ' ' || req.body[i] == '\t')) i++;
     if (i < req.body.size() && req.body[i] == '[') {
-        http_send_error(c, 400, VBMCP_ERR_INVALID_REQUEST,
+        http_send_error(c, 400, VBDMCP_ERR_INVALID_REQUEST,
                         "JSON-RPC batching is not supported", req.origin);
         return;
     }
 
     /* 同一连接同时只允许一个在飞任务：c->pending 是单槽，覆盖它会让上一个
-     * 请求永远收不到响应（任务却仍在队列里照常执行，对 vb_write_* 还会造成
+     * 请求永远收不到响应（任务却仍在队列里照常执行，对 vbd_write_* 还会造成
      * "客户端以为失败、实际已写入"的静默副作用）。 */
     if (c->pending) {
-        http_send_error(c, 429, VBMCP_ERR_BUSY,
+        http_send_error(c, 429, VBDMCP_ERR_BUSY,
                         _F("Another request from this connection is still in flight; wait for its response before sending the next one."),
                         req.origin);
-        vbmcp_logf(VBMCP_LOG_WARN,
+        vbdmcp_logf(VBDMCP_LOG_WARN,
                    "tool task rejected: connection already busy (client=%s)",
                    c->peer.c_str());
         return;
@@ -757,8 +757,8 @@ void handle_mcp_post(Connection* c, const HttpRequest& req)
         const char *msg =
             _F("Server busy: %d MCP tasks are already queued on the VB Decompiler UI thread (limit %d). The request was rejected to keep the UI responsive; retry in a moment.",
                kTaskQueueLimit, kTaskQueueLimit);
-        http_send_error(c, 429, VBMCP_ERR_BUSY, msg, req.origin);
-        vbmcp_logf(VBMCP_LOG_WARN, "tool task rejected: UI queue full (client=%s)",
+        http_send_error(c, 429, VBDMCP_ERR_BUSY, msg, req.origin);
+        vbdmcp_logf(VBDMCP_LOG_WARN, "tool task rejected: UI queue full (client=%s)",
                    c->peer.c_str());
         return;
     }
@@ -769,15 +769,15 @@ void handle_mcp_post(Connection* c, const HttpRequest& req)
      * 字样的普通工具请求（例如写入含该词的代码）误判为 initialize。 */
     c->pending = task;
     g_session_was_used.store(true);
-    vbmcp_logf(VBMCP_LOG_INFO, "tool task queued (%zu bytes, client=%s)",
+    vbdmcp_logf(VBDMCP_LOG_INFO, "tool task queued (%zu bytes, client=%s)",
                task->body.size(), c->peer.c_str());
 }
 
 void handle_request(Connection* c, const HttpRequest& req)
 {
     /* DEBUG 级：把协商相关的头一并记下。排查"客户端连不上"时先开
-     * VBMCP_DEBUG_LOG=1，看这一行是否到达、以及 accept/协议版本/会话是否符合预期。 */
-    vbmcp_logf(VBMCP_LOG_DEBUG,
+     * VBDMCP_DEBUG_LOG=1，看这一行是否到达、以及 accept/协议版本/会话是否符合预期。 */
+    vbdmcp_logf(VBDMCP_LOG_DEBUG,
                "http %s %s (client=%s, body=%zu, accept='%s', ctype='%s', proto='%s', session=%s)",
                req.method.c_str(), req.path.c_str(), c->peer.c_str(), req.body.size(),
                req.accept.c_str(), req.content_type.c_str(),
@@ -796,13 +796,13 @@ void handle_request(Connection* c, const HttpRequest& req)
     }
 
     if (!is_mcp_path(req.path) && req.path != "/sse") {
-        http_send_error(c, 404, VBMCP_ERR_INVALID_REQUEST, "Not Found", req.origin);
+        http_send_error(c, 404, VBDMCP_ERR_INVALID_REQUEST, "Not Found", req.origin);
         return;
     }
 
     if (req.method == "GET") {
         if (!accept_has(req.accept, "text/event-stream")) {
-            http_send_error(c, 406, VBMCP_ERR_INVALID_REQUEST,
+            http_send_error(c, 406, VBDMCP_ERR_INVALID_REQUEST,
                             "Accept must include text/event-stream", req.origin);
             return;
         }
@@ -814,7 +814,7 @@ void handle_request(Connection* c, const HttpRequest& req)
         if (c->pending) c->pending->cancelled.store(true);
         c->session_id.clear();
         http_send_raw(c, 204, "text/plain", req.origin, "", "", false);
-        vbmcp_logf(VBMCP_LOG_INFO, "session terminated by client (client=%s)", c->peer.c_str());
+        vbdmcp_logf(VBDMCP_LOG_INFO, "session terminated by client (client=%s)", c->peer.c_str());
         return;
     }
 
@@ -823,7 +823,7 @@ void handle_request(Connection* c, const HttpRequest& req)
         return;
     }
 
-    http_send_error(c, 405, VBMCP_ERR_INVALID_REQUEST, "Method Not Allowed", req.origin);
+    http_send_error(c, 405, VBDMCP_ERR_INVALID_REQUEST, "Method Not Allowed", req.origin);
 }
 
 /* ============================================================
@@ -857,8 +857,8 @@ bool connection_on_readable(Connection* c)
     if (c->is_sse) return true;                  /* SSE 上的客户端数据忽略 */
 
     c->recv_buf.append(tmp, (std::size_t)r);
-    if (c->recv_buf.size() > (std::size_t)VBMCP_MAX_BODY_SIZE + VBMCP_MAX_HEADER_SIZE) {
-        http_send_error(c, 413, VBMCP_ERR_INVALID_REQUEST, "payload too large");
+    if (c->recv_buf.size() > (std::size_t)VBDMCP_MAX_BODY_SIZE + VBDMCP_MAX_HEADER_SIZE) {
+        http_send_error(c, 413, VBDMCP_ERR_INVALID_REQUEST, "payload too large");
         return true;
     }
 
@@ -867,21 +867,21 @@ bool connection_on_readable(Connection* c)
         const int st = parse_request(c->recv_buf, req);
         if (st == 0) return true;
         if (st == -2) {
-            http_send_error(c, 413, VBMCP_ERR_INVALID_REQUEST, "payload too large");
+            http_send_error(c, 413, VBDMCP_ERR_INVALID_REQUEST, "payload too large");
             return true;
         }
         if (st == -3) {
-            http_send_error(c, 400, VBMCP_ERR_PARSE,
+            http_send_error(c, 400, VBDMCP_ERR_PARSE,
                             "unsupported Transfer-Encoding: chunked; send Content-Length instead");
             return true;
         }
         if (st < 0) {
-            http_send_error(c, 400, VBMCP_ERR_PARSE, "malformed HTTP request");
+            http_send_error(c, 400, VBDMCP_ERR_PARSE, "malformed HTTP request");
             return true;
         }
         c->recv_buf.erase(0, req.total);
         handle_request(c, req);
-        if (c->close_after_send || c->is_sse) return vbmcp_flush(c) != 0;
+        if (c->close_after_send || c->is_sse) return vbdmcp_flush(c) != 0;
     }
 }
 
@@ -916,15 +916,15 @@ bool connection_poll_task(Connection* c, int timeout_ms)
             _F("Task timed out: the request waited longer than %d seconds for the VB Decompiler UI thread. The operation was cancelled; try again with a smaller scope (for example a single module or function).",
                timeout_ms / 1000);
         c->pending.reset();
-        http_send_json(c, 200, "", json_error_document(VBMCP_ERR_TIMEOUT, msg));
-        vbmcp_logf(VBMCP_LOG_WARN, "tool task timeout after %lldms (client=%s)",
+        http_send_json(c, 200, "", json_error_document(VBDMCP_ERR_TIMEOUT, msg));
+        vbdmcp_logf(VBDMCP_LOG_WARN, "tool task timeout after %lldms (client=%s)",
                    (long long)age, c->peer.c_str());
         return true;
     }
 
     if (client_gone(c)) {
         task->cancelled.store(true);            /* 客户端断开 → 及时释放后台任务 */
-        vbmcp_logf(VBMCP_LOG_INFO, "client gone, task cancelled (client=%s)",
+        vbdmcp_logf(VBDMCP_LOG_INFO, "client gone, task cancelled (client=%s)",
                    c->peer.c_str());
         c->pending.reset();
         return false;
@@ -943,16 +943,16 @@ int task_timeout_ms()
 {
     static int cached = -1;
     if (cached >= 0) return cached;
-    cached = VBMCP_TASK_TIMEOUT_MS;
+    cached = VBDMCP_TASK_TIMEOUT_MS;
     char env[16] = {0};
-    if (GetEnvironmentVariableA("VBMCP_TASK_TIMEOUT_MS", env, sizeof(env)) > 0) {
+    if (GetEnvironmentVariableA("VBDMCP_TASK_TIMEOUT_MS", env, sizeof(env)) > 0) {
         const int v = atoi(env);
         if (v >= 1000 && v <= 600000) cached = v;
     }
     return cached;
 }
 
-vbmcp::SocketHandle create_listen_socket(const std::string& bind_addr, int port)
+vbdmcp::SocketHandle create_listen_socket(const std::string& bind_addr, int port)
 {
     struct addrinfo hints;
     ZeroMemory(&hints, sizeof(hints));
@@ -966,16 +966,16 @@ vbmcp::SocketHandle create_listen_socket(const std::string& bind_addr, int port)
 
     struct addrinfo* ai = nullptr;
     if (getaddrinfo(bind_addr.c_str(), port_str, &hints, &ai) != 0 || !ai)
-        return vbmcp::SocketHandle();
+        return vbdmcp::SocketHandle();
 
-    vbmcp::SocketHandle listener;
+    vbdmcp::SocketHandle listener;
     for (struct addrinfo* p = ai; p; p = p->ai_next) {
         SOCKET s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (s == INVALID_SOCKET) continue;
         int reuse = 1;
         setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
         if (bind(s, p->ai_addr, (int)p->ai_addrlen) == SOCKET_ERROR) {
-            vbmcp_logf(VBMCP_LOG_ERROR, "bind(%s:%d) failed err=%d",
+            vbdmcp_logf(VBDMCP_LOG_ERROR, "bind(%s:%d) failed err=%d",
                        bind_addr.c_str(), port, WSAGetLastError());
             closesocket(s);
             continue;
@@ -994,7 +994,7 @@ vbmcp::SocketHandle create_listen_socket(const std::string& bind_addr, int port)
     return listener;
 }
 
-/* bind 结果就绪（成功或失败）→ 唤醒 vbmcp_server_start 的等待方 */
+/* bind 结果就绪（成功或失败）→ 唤醒 vbdmcp_server_start 的等待方 */
 void signal_net_init_done()
 {
     {
@@ -1006,12 +1006,12 @@ void signal_net_init_done()
 
 void network_thread_main()
 {
-    const std::string bind_addr = vbmcp_bind_address();
+    const std::string bind_addr = vbdmcp_bind_address();
     const int port = g_port.load();
 
-    vbmcp::SocketHandle listener = create_listen_socket(bind_addr, port);
+    vbdmcp::SocketHandle listener = create_listen_socket(bind_addr, port);
     if (!listener) {
-        vbmcp_logf(VBMCP_LOG_ERROR, "listen socket creation failed (%s:%d)",
+        vbdmcp_logf(VBDMCP_LOG_ERROR, "listen socket creation failed (%s:%d)",
                    bind_addr.c_str(), port);
         g_net_inited.store(false);
         signal_net_init_done();
@@ -1019,7 +1019,7 @@ void network_thread_main()
     }
     g_net_inited.store(true);
     signal_net_init_done();
-    vbmcp_logf(VBMCP_LOG_INFO, "MCP Streamable HTTP listening on %s:%d (thread=%lu)",
+    vbdmcp_logf(VBDMCP_LOG_INFO, "MCP Streamable HTTP listening on %s:%d (thread=%lu)",
                bind_addr.c_str(), port, GetCurrentThreadId());
 
     std::vector<std::unique_ptr<Connection>> conns;
@@ -1040,13 +1040,13 @@ void network_thread_main()
         const int n = select(0, &rfds, &wfds, nullptr, &tv);
         if (n == SOCKET_ERROR) {
             if (WSAGetLastError() == WSAEINTR) continue;
-            vbmcp_logf(VBMCP_LOG_ERROR, "select failed err=%d", WSAGetLastError());
+            vbdmcp_logf(VBDMCP_LOG_ERROR, "select failed err=%d", WSAGetLastError());
             break;
         }
 
         if (FD_ISSET(listener.get(), &rfds)) {
             bool refused = false;
-            while ((int)conns.size() < VBMCP_MAX_CONNECTIONS) {
+            while ((int)conns.size() < VBDMCP_MAX_CONNECTIONS) {
                 SOCKET cs = accept(listener.get(), nullptr, nullptr);
                 if (cs == INVALID_SOCKET) break;
                 int one = 1;
@@ -1060,18 +1060,18 @@ void network_thread_main()
                 conn->sock.reset(cs);
                 conn->peer = peer_name(cs);
                 conn->last_active = std::chrono::steady_clock::now();
-                vbmcp_logf(VBMCP_LOG_INFO, "client connected: %s", conn->peer.c_str());
+                vbdmcp_logf(VBDMCP_LOG_INFO, "client connected: %s", conn->peer.c_str());
                 conns.push_back(std::move(conn));
                 refused = false;                 /* 又收下了：允许下次再告警 */
             }
             /* 满额时新连接被内核直接丢掉，客户端只看到连接被重置。
              * 记一条日志（每次"开始满额"只记一次，否则每 50ms 轮询刷屏），
              * 否则"AI 客户端连不上"这类问题无从排查。 */
-            if (!refused && (int)conns.size() >= VBMCP_MAX_CONNECTIONS) {
+            if (!refused && (int)conns.size() >= VBDMCP_MAX_CONNECTIONS) {
                 refused = true;
-                vbmcp_logf(VBMCP_LOG_WARN,
+                vbdmcp_logf(VBDMCP_LOG_WARN,
                            "accept: connection limit reached (%d), extra clients refused",
-                           VBMCP_MAX_CONNECTIONS);
+                           VBDMCP_MAX_CONNECTIONS);
             }
         }
 
@@ -1080,7 +1080,7 @@ void network_thread_main()
             bool keep = true;
 
             if (c->sock.valid() && FD_ISSET(c->sock.get(), &wfds)) {
-                if (!vbmcp_flush(c)) keep = false;
+                if (!vbdmcp_flush(c)) keep = false;
             }
             if (keep && c->sock.valid() && FD_ISSET(c->sock.get(), &rfds)) {
                 if (!connection_on_readable(c)) keep = false;
@@ -1094,7 +1094,7 @@ void network_thread_main()
                     c->pending->cancelled.store(true);    /* 断开即取消后台任务 */
                     c->pending.reset();
                 }
-                vbmcp_logf(VBMCP_LOG_INFO, "client disconnected: %s", c->peer.c_str());
+                vbdmcp_logf(VBDMCP_LOG_INFO, "client disconnected: %s", c->peer.c_str());
                 c->sock.reset();
                 it = conns.erase(it);
             } else {
@@ -1108,8 +1108,8 @@ void network_thread_main()
         /* 所有客户端都已断开 → 会话准入授权失效：
          * 下一次新连接首次调用工具时重新弹窗确认（服务重启同理）。 */
         if (conns.empty() && g_session_was_used.exchange(false)) {
-            vbmcp_session_reset();
-            vbmcp_logf(VBMCP_LOG_INFO, "all clients gone: session authorization reset");
+            vbdmcp_session_reset();
+            vbdmcp_logf(VBDMCP_LOG_INFO, "all clients gone: session authorization reset");
         }
     }
 
@@ -1122,7 +1122,7 @@ void network_thread_main()
     }
     conns.clear();
     g_net_inited.store(false);
-    vbmcp_logf(VBMCP_LOG_INFO, "network thread exited");
+    vbdmcp_logf(VBDMCP_LOG_INFO, "network thread exited");
 }
 
 void apply_globals()
@@ -1130,9 +1130,9 @@ void apply_globals()
     if (g_engine) {
         char msg[160];
         _snprintf_s(msg, sizeof(msg), _TRUNCATE, "MCP: %s on %s:%d",
-                    vbmcp_server_is_running() ? "running" : "stopped",
-                    vbmcp_bind_address().c_str(), g_port.load());
-        vb_set_status(msg);
+                    vbdmcp_server_is_running() ? "running" : "stopped",
+                    vbdmcp_bind_address().c_str(), g_port.load());
+        vbd_set_status(msg);
     }
 }
 
@@ -1141,29 +1141,29 @@ void apply_globals()
 /* ============================================================
  * 对外接口
  * ============================================================ */
-void vbmcp_http_set_protocol_version(const char* ver)
+void vbdmcp_http_set_protocol_version(const char* ver)
 {
     if (!ver || !*ver) return;
     const size_t n = strlen(ver);
-    char *copy = (char *)vbmcp_alloc(n + 1);
+    char *copy = (char *)vbdmcp_alloc(n + 1);
     if (!copy) return;
     memcpy(copy, ver, n + 1);              /* 含结尾 NUL */
     g_active_protocol_version.store(copy, std::memory_order_release);
 }
 
-std::string vbmcp_bind_address()
+std::string vbdmcp_bind_address()
 {
     std::lock_guard<std::mutex> lk(g_bind_mu);
-    return g_bind_addr.empty() ? std::string(VBMCP_DEFAULT_BIND) : g_bind_addr;
+    return g_bind_addr.empty() ? std::string(VBDMCP_DEFAULT_BIND) : g_bind_addr;
 }
 
-void vbmcp_set_bind_address(const char* addr)
+void vbdmcp_set_bind_address(const char* addr)
 {
     std::lock_guard<std::mutex> lk(g_bind_mu);
-    g_bind_addr = (addr && *addr) ? addr : VBMCP_DEFAULT_BIND;
+    g_bind_addr = (addr && *addr) ? addr : VBDMCP_DEFAULT_BIND;
 }
 
-int vbmcp_server_start()
+int vbdmcp_server_start()
 {
     if (g_net_running.load()) return 1;              /* 幂等 */
     if (!g_enabled.load()) return 1;
@@ -1171,7 +1171,7 @@ int vbmcp_server_start()
     if (!g_winsock_inited.load()) {
         WSADATA wsadata;
         if (WSAStartup(MAKEWORD(2, 2), &wsadata) != 0) {
-            vbmcp_logf(VBMCP_LOG_ERROR, "WSAStartup failed");
+            vbdmcp_logf(VBDMCP_LOG_ERROR, "WSAStartup failed");
             return 0;
         }
         g_winsock_inited.store(true);
@@ -1179,7 +1179,7 @@ int vbmcp_server_start()
 
     /* 消息窗口必须在 UI 主线程创建：网络线程 PostMessage 投递任务给它 */
     if (!g_task_hwnd) {
-        static const char* kClass = "VBMCP_TASK_V1";
+        static const char* kClass = "VBDMCP_TASK_V1";
         WNDCLASS wc;
         ZeroMemory(&wc, sizeof(wc));
         wc.lpfnWndProc   = task_wnd_proc;
@@ -1189,7 +1189,7 @@ int vbmcp_server_start()
         g_task_hwnd = CreateWindowExA(0, kClass, kClass, 0, 0, 0, 0, 0,
                                        HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
         if (!g_task_hwnd) {
-            vbmcp_logf(VBMCP_LOG_ERROR, "task window creation failed");
+            vbdmcp_logf(VBDMCP_LOG_ERROR, "task window creation failed");
             return 0;
         }
     }
@@ -1214,12 +1214,12 @@ int vbmcp_server_start()
     return 1;
 }
 
-void vbmcp_server_signal_stop()
+void vbdmcp_server_signal_stop()
 {
     g_net_running.store(false);
 }
 
-void vbmcp_server_stop()
+void vbdmcp_server_stop()
 {
     if (g_net_running.exchange(false)) {
         if (g_net_thread.joinable()) g_net_thread.join();
@@ -1231,14 +1231,14 @@ void vbmcp_server_stop()
         for (auto& t : g_task_queue) t->cancelled.store(true);
         g_task_queue.clear();
     }
-    vbmcp_session_reset();          /* 服务停止 → 会话准入授权状态重置 */
+    vbdmcp_session_reset();          /* 服务停止 → 会话准入授权状态重置 */
 
     if (g_task_hwnd) {
         ::DestroyWindow(g_task_hwnd);
         g_task_hwnd = nullptr;
     }
 
-    /* 与 vbmcp_server_start 里的 WSAStartup 配对：反复"停服→启服"会累积
+    /* 与 vbdmcp_server_start 里的 WSAStartup 配对：反复"停服→启服"会累积
      * Winsock 引用计数（进程退出时系统会回收，但用户反复开关时不该泄漏）。
      * 注意：必须在网络线程 join 之后再调用。 */
     if (g_winsock_inited.exchange(false)) {
@@ -1246,44 +1246,44 @@ void vbmcp_server_stop()
     }
 }
 
-int vbmcp_server_is_running()
+int vbdmcp_server_is_running()
 {
     return g_net_inited.load() ? 1 : 0;
 }
 
-int vbmcp_server_apply(int enable, int port)
+int vbdmcp_server_apply(int enable, int port)
 {
     if (enable) {
         const bool port_changed = (port > 0 && port < 65536 && port != g_port.load());
         if (port_changed) g_port.store(port);
         g_enabled.store(1);
 
-        if (vbmcp_server_is_running()) {
+        if (vbdmcp_server_is_running()) {
             if (port_changed) {
-                vbmcp_logf(VBMCP_LOG_INFO, "port changed to %d, restarting server",
+                vbdmcp_logf(VBDMCP_LOG_INFO, "port changed to %d, restarting server",
                            g_port.load());
-                vbmcp_server_stop();
-                if (!vbmcp_server_start()) return 0;
+                vbdmcp_server_stop();
+                if (!vbdmcp_server_start()) return 0;
             }
             apply_globals();
             return 1;
         }
-        if (!vbmcp_server_start()) return 0;
+        if (!vbdmcp_server_start()) return 0;
         apply_globals();
         return 1;
     }
 
     g_enabled.store(0);
-    vbmcp_server_stop();
+    vbdmcp_server_stop();
     apply_globals();
     return 1;
 }
 
-void vbmcp_notify_tools_list_changed()
+void vbdmcp_notify_tools_list_changed()
 {
     /* 服务未运行时不残留广播标志（否则下次启动的首个 SSE 连接会收到
      * 一次无意义的 list_changed 通知）。 */
-    if (!vbmcp_server_is_running()) return;
+    if (!vbdmcp_server_is_running()) return;
     {
         std::lock_guard<std::mutex> lk(g_list_changed_mu);
         g_list_changed_payload =
