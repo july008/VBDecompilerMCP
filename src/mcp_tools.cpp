@@ -408,10 +408,12 @@ static const std::vector<std::string> *get_module_names(void)
         for (int i = 0; i < VBMCP_MAX_MODULES; i++) {
             char *name = vb_get_value(VB_GetModuleName, i, 0);
             if (!name || !*name) { if (name) vbmcp_free(name); break; }
-            /* 只收合法 VB 标识符：列表末尾的 GUI 装饰项（如 "End of forms :)"）
-             * 不是模块。用 continue 而不是 break —— 万一中间出现异常条目，
-             * 也不会丢掉它后面的模块。 */
-            if (is_vb_identifier(name)) g_module_cache.names.emplace_back(name);
+            /* 列表末尾是 GUI 装饰项（如 "End of forms :)"）：它标志列表结束，
+             * 遇到即停止探测。这样既过滤掉装饰项，又**不再继续访问真正越界的
+             * 索引** —— 引擎对越界索引的访问可能有宿主副作用（实测
+             * GetVBForm(999999) 会让当前视图切到空位置）。 */
+            if (!is_vb_identifier(name)) { vbmcp_free(name); break; }
+            g_module_cache.names.emplace_back(name);
             vbmcp_free(name);
         }
         g_module_cache.key = key;
